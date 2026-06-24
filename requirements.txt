@@ -1,7 +1,9 @@
-# Doxify 依赖
+# DoxifySlim 依赖
 fastapi>=0.115.0
 uvicorn>=0.30.0
 httpx>=0.27.0
 python-dotenv>=1.0.0
 PyMuPDF>=1.24.0
 langdetect>=1.0.9
+# FastAPI 表单/文件上传解析所需（/parse_pdf_stream 与 /translate_stream 均用到 Form/UploadFile）
+python-multipart>=0.0.9
