@@ -75,19 +75,19 @@ install.bat       # Windows
 ### 2. Markdown 翻译 — `/translate`（Web UI）+ `POST /translate_stream`（SSE 端点）
 
 **关键函数**：
-- `split_text_into_chunks(text, max_chars)` — 在段落边界切块，块大小不超过 `TRANSLATE_CHUNK_CHARS`
+- `split_markdown_chunks(text, max_chars)` — 在段落边界切块，块大小不超过 `TRANSLATE_CHUNK_CHARS`
 - `translate_chunk_stream(client, chunk, target_lang, chunk_id, file_id)` — 单块流式翻译；过滤 `<think>...</think>` 内容；统计 `reasoning_content` 长度，非零时记 WARNING
 - `_detect_residual_english(text)` — 用 `langdetect` 检测块中残留英文（排除代码、URL、白名单缩写及 `中文（English）` 注释模式）
 - `_fix_residual_english(client, chunk, target_lang)` — 一次性非流式修正调用，触发 `chunk_replace` 事件告知前端替换缓冲区
-- `translate_file_streaming(...)` — 单文件编排：`split_text_into_chunks` → `asyncio.gather` 并发翻译各块（受 `_api_semaphore` 约束）→ 按块序拼接
+- `_translate_file_task(...)`（`translate_stream` 内部闭包）— 单文件编排：`split_markdown_chunks` → `asyncio.gather` 并发翻译各块（受 `_api_semaphore` 约束）→ 按块序拼接
 
 **SSE 事件**：`init` → `file_start` → (`chunk_start` → `chunk_token`... → `chunk_done` [→ `chunk_replace` 如有修正]) × N → `file_done` → `all_done`
 
 ### 3. 其他端点
 
-- `GET /health` — 返回 `{"status": "ok", "model": "...", "port": ...}`，可用于存活检测
-- `GET /` — 解析页 HTML（内联在 `app.py` 的 `_INDEX_HTML` 字符串常量中）
-- `GET /translate` — 翻译页 HTML（内联在 `_TRANSLATE_HTML`）
+- `GET /health` — 返回 `{"status": "ok", "target_api": "..."}`（未配置时 `target_api` 为 `"not configured"`），可用于存活检测
+- `GET /` — 解析页 HTML（内联在 `app.py` 的 `UPLOAD_PAGE_HTML` 字符串常量中）
+- `GET /translate` — 翻译页 HTML（内联在 `TRANSLATE_PAGE_HTML`）
 
 ## 关闭思考模式
 
