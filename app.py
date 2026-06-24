@@ -493,7 +493,7 @@ UPLOAD_PAGE_HTML = """
     <div class="dotmatrix"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
     <div class="overline"><span class="sq"></span><em>Document Parsing · 文档解析</em></div>
     <h1>PDF <b>智能解析</b></h1>
-    <p class="subtitle">选择解析模式，拖入 PDF，实时输出结构化 Markdown，支持多文件并行处理。</p>
+    <p class="subtitle">拖入 PDF，基于 Kimi 2.6 VLM 实时输出结构化 Markdown，支持多文件并行处理。</p>
   </div>
 
   <div class="section-label">处理选项</div>

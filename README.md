@@ -8,6 +8,16 @@ PDF → Kimi 2.6 VLM（逐页识别）→ Markdown
                                    └── Markdown → 分块并行翻译 → 译文 Markdown
 ```
 
+## 界面预览
+
+**PDF 解析页**（`/`）
+
+![PDF 解析页](docs/images/parse.png)
+
+**Markdown 翻译页**（`/translate`）
+
+![Markdown 翻译页](docs/images/translate.png)
+
 ---
 
 ## 功能
@@ -201,6 +211,12 @@ DoxifySlim/
 - 翻译分块：按 `TRANSLATE_CHUNK_CHARS` 在自然段落边界切块，各块并行，结果合并后输出
 - 全局信号量 `_api_semaphore` 限制同时发出的 API 请求数，防止触发 API 速率限制
 - 日志写入 `gateway.log`（同目录）
+
+---
+
+## 许可证
+
+本项目以 [MIT License](LICENSE) 开源。前端保留的 "JT&N 金诚同达" 品牌标识为商标，不在 MIT 授权范围内。
 
 ---
 
