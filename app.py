@@ -525,7 +525,7 @@ fileInput.addEventListener('change', () => {
 });
 
 function createCard(fileId, filename) {
-  fileState[fileId] = { md: '', filename, pages: 0, pageTexts: {}, indeterminate: false };
+  fileState[fileId] = { md: '', filename, pages: 0, pageTexts: {} };
   const card = document.createElement('div');
   card.className = 'file-card';
   card.id = 'card-' + fileId;
@@ -622,7 +622,6 @@ function handleEvent(evt, tmpCards, startTime) {
     st.md = evt.markdown || '';
   } else if (evt.type === 'file_error') {
     const bar = document.getElementById('bar-' + fid);
-    bar.classList.remove('indeterminate');
     bar.style.width = '100%';
     bar.style.background = '#e74c3c';
     setStatus(fid, '处理失败', false);
