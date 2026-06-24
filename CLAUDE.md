@@ -2,108 +2,135 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Running Doxify
+## 项目概述
+
+DoxifySlim 是 Doxify 的精简版（**已移除 MinerU / PaddleOCR-VL**），仅保留 Kimi 2.6 VLM 解析路径和 Markdown 翻译。  
+单文件 FastAPI 应用 (`app.py`)，pip-venv 安装，无本地模型下载。
+
+## 启动方式
 
 ```bash
-# Preferred: activates conda env and starts the service
-bash start.sh
-
-# Direct (if mineru conda env is already active)
+# 激活虚拟环境后直接启动
+source .venv/bin/activate
 python app.py
 ```
 
-Listens on `http://127.0.0.1:4000`. The conda environment is named `mineru`.
+或使用 macOS 脚本（自动激活 venv）：
 
-## Environment Configuration
+```bash
+bash start.sh
+```
 
-All config lives in `.env` (copy from `.env.example`). Key variables:
+默认监听 `http://127.0.0.1:4000`（由 `.env` 的 `GATEWAY_PORT` 控制）。
 
-| Variable | Purpose |
+## 安装
+
+```bash
+bash install.sh   # macOS（多镜像自动回退：阿里云→清华→中科大）
+install.bat       # Windows
+```
+
+脚本创建 `.venv`，安装 `requirements.txt` 中的 7 个依赖（无模型下载），首次运行时从 `.env.example` 复制 `.env`。
+
+## 环境配置
+
+所有配置读自 `.env`（从 `.env.example` 复制后填写）：
+
+| 变量 | 说明 |
 |---|---|
-| `TARGET_API_URL` | OpenAI-compatible LLM endpoint |
-| `TARGET_API_KEY` | API key for the LLM |
-| `ACTUAL_MODEL_NAME` | Model name used for VLM and translation (e.g. `kimi26`) |
-| `GATEWAY_PORT` | Default 4000 |
-| `PDF_DPI` | Resolution for PDF→image conversion (default 200) |
-| `CONCURRENCY` | VLM parallel workers per file (default 5) |
-| `MAX_CONCURRENT_REQUESTS` | Global cap across all files+workers (default 8) |
-| `MINERU_TIMEOUT` | Timeout for local MinerU subprocess (default 1800s) |
-| `MINERU_VIRTUAL_VRAM_SIZE` | Reported VRAM in GB; drives MinerU's batch_ratio (default 32 → batch_ratio=16). MPS has no native VRAM detection in MinerU 3.0.x, so this is required on Apple Silicon. |
-| `MINERU_HYBRID_BATCH_RATIO` | Direct batch_ratio for hybrid backend (default 16) |
-| `MINERU_PDF_RENDER_THREADS` | Threads for PDF→image rendering inside MinerU (default 8) |
-| `MINERU_DEVICE_MODE` | Force device for MinerU subprocess (default `mps` on M-series) |
-| `LOCAL_OCR_CONCURRENCY` | PaddleOCR parallel pages (default 4, M5 Max) |
-| `PADDLE_MLX_ENABLED` | Use MLX-accelerated PaddleOCR-VL backend (default 1; falls back to CPU if server down) |
-| `PADDLE_MLX_VENV` | Isolated venv that runs `mlx_vlm.server` (default `~/paddleocr_vl_venv`) |
-| `PADDLE_MLX_SERVER_PORT` | Port for the MLX server (default 8111) |
-| `PADDLE_MLX_MODEL_NAME` | VLM model served by MLX (default `PaddlePaddle/PaddleOCR-VL-1.6`) |
-| `PADDLE_VL_CONCURRENCY` | PaddleOCR-VL chunks processed concurrently (default 3; auto-forced to 1 on the CPU fallback path) |
+| `TARGET_API_URL` | OpenAI 兼容的 chat/completions 端点 |
+| `TARGET_API_KEY` | API 密钥 |
+| `ACTUAL_MODEL_NAME` | 模型名（VLM 解析与翻译共用） |
+| `GATEWAY_PORT` | 服务端口，默认 4000 |
+| `LLM_TIMEOUT` | LLM 请求总超时（秒），默认 300 |
+| `PAGE_TIMEOUT` | 单页 VLM 超时（秒），默认 120 |
+| `PDF_DPI` | PDF→图片分辨率，默认 200 |
+| `CONCURRENCY` | 单文件内并发 Worker 数，默认 5 |
+| `CONCURRENCY_THRESHOLD` | 启用并发的最小页数，默认 10 |
+| `MAX_CONCURRENT_REQUESTS` | 全局最大同时 API 请求数，默认 8 |
+| `TRANSLATE_CHUNK_CHARS` | 翻译每块最大字符数，默认 3000 |
+| `TRANSLATE_TARGET_LANG` | 默认翻译目标语言，默认"中文" |
 
-## Architecture
+## 架构
 
-Single file: `app.py`. FastAPI app with two functional areas:
+单文件：`app.py`。两个功能区：
 
-### 1. PDF Parsing — `/` (web UI) + `POST /parse_pdf_stream` (SSE endpoint)
+### 1. PDF 解析 — `/`（Web UI）+ `POST /parse_pdf_stream`（SSE 端点）
 
-Four modes, selected in the web UI:
+**调用链**：  
+`POST /parse_pdf_stream` → `parse_pdf_streaming(data, filename, file_id, queue, strip_wm, pm)` → 多个 `vlm_recognize_page` 并发任务
 
-- **vlm** — PDF→images via PyMuPDF → Kimi 2.6 VLM API per page → Markdown. Pages are split into `CONCURRENCY` groups processed in parallel, bounded by `_api_semaphore`.
-- **mineru_txt** — calls `mineru -p <pdf> -o <out_dir> --method txt` in a subprocess via `run_in_executor`. For digital PDFs with embedded text.
-- **mineru_ocr** — same as above but `--method ocr`. For scanned PDFs; uses MinerU's internal `ch_lite` OCR model.
-- **paddleocr** — PaddleOCR-VL chunked document parsing, 3 pages per chunk (`PADDLEOCR_VL_CHUNK_PAGES`). Chunks run concurrently via `asyncio.gather` + a `Semaphore(PADDLE_VL_CONCURRENCY)` (forced to 1 on the CPU fallback path); results are back-filled by chunk index so order is preserved. Supports tables/formulas/layout. MLX-accelerated by default (see PaddleOCR-VL Instance Management).
+**关键函数**：
+- `pdf_to_images(pdf_bytes, dpi)` — PyMuPDF 将 PDF 每页转为 PNG 字节列表
+- `vlm_recognize_page(client, image_bytes, page_num, total_pages)` — 单页 VLM 识别，最多 3 次重试，超时递增 50%；发送三个关闭思考模式的标志（`enable_thinking`/`chat_template_kwargs`/`thinking`）
+- `_split_into_groups(total, n_groups)` — 将页码均匀分成 n 组，供并发 Worker 使用
+- `parse_pdf_streaming(data, filename, file_id, queue, strip_watermark, page_markers)` — 主编排函数；页数 ≥ `CONCURRENCY_THRESHOLD` 时启用并发（`asyncio.gather`），否则顺序处理；`strip_watermark=True` 时对每页结果调用 `_strip_watermarks`；`page_markers=True` 时插入分页分隔符
+- `_strip_watermarks(md, enabled, file_id)` — 用正则剥离 EAPA 风格 Barcode 头部水印（`_WATERMARK_HEADER_RE`）和 Filed By 脚部水印（`_WATERMARK_FOOTER_RE`）
+- `_api_semaphore` — `asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)`，限制全局同时发出的 API 请求数
 
-Outputs persist to `output/<file_id>/` and are zipped for download via `GET /download_zip/{file_id}`. The `<file_id>` is a uuid hex generated per request.
+**表单字段**：`files`（多文件）、`strip_watermark`（bool）、`page_markers`（bool）
 
-SSE event protocol (all events carry `file_id`):
-- `init` — file list, sent before processing starts
-- `file_start` — `total > 0` means per-page progress; `total == 0` means indeterminate (MinerU modes)
-- `page_done` — per-page result (vlm, paddleocr only)
-- `file_done` — includes `markdown` field; `has_images: true` triggers the ZIP-download button on the UI
-- `file_error` — MinerU subprocess failure
+**SSE 事件**：`init` → `file_start`（`total` = 总页数）→ `page_done` × N → `file_done`（含 `markdown` 字段）→（`file_error`）
 
-### 2. Markdown Translation — `/translate` (web UI) + `POST /translate_stream` (SSE endpoint)
+### 2. Markdown 翻译 — `/translate`（Web UI）+ `POST /translate_stream`（SSE 端点）
 
-Two input modes (paste text / upload multiple `.md` files). Files run in parallel via `asyncio.create_task` + shared `asyncio.Queue`. **Chunks within a single file also run in parallel** via `asyncio.gather`, bounded by `MAX_CONCURRENT_REQUESTS` through `_api_semaphore`.
+**关键函数**：
+- `split_text_into_chunks(text, max_chars)` — 在段落边界切块，块大小不超过 `TRANSLATE_CHUNK_CHARS`
+- `translate_chunk_stream(client, chunk, target_lang, chunk_id, file_id)` — 单块流式翻译；过滤 `<think>...</think>` 内容；统计 `reasoning_content` 长度，非零时记 WARNING
+- `_detect_residual_english(text)` — 用 `langdetect` 检测块中残留英文（排除代码、URL、白名单缩写及 `中文（English）` 注释模式）
+- `_fix_residual_english(client, chunk, target_lang)` — 一次性非流式修正调用，触发 `chunk_replace` 事件告知前端替换缓冲区
+- `translate_file_streaming(...)` — 单文件编排：`split_text_into_chunks` → `asyncio.gather` 并发翻译各块（受 `_api_semaphore` 约束）→ 按块序拼接
 
-After each chunk streams, `_detect_residual_english(buf)` scans for English words that escaped translation (excluding code, URLs, whitelisted acronyms/proper nouns, and the `中文（English）` annotation pattern). If any residuals are found, `_fix_residual_english(...)` does a one-shot non-streaming correction call and a `chunk_replace` event tells the frontend to swap the chunk's buffer.
+**SSE 事件**：`init` → `file_start` → (`chunk_start` → `chunk_token`... → `chunk_done` [→ `chunk_replace` 如有修正]) × N → `file_done` → `all_done`
 
-SSE event protocol: `init` → `file_start` → (`chunk_start` → `chunk_token`... → `chunk_done` [→ `chunk_replace` if fix applied]) × N → `file_done` → `all_done`.
+### 3. 其他端点
 
-## Thinking-mode disable
+- `GET /health` — 返回 `{"status": "ok", "model": "...", "port": ...}`，可用于存活检测
+- `GET /` — 解析页 HTML（内联在 `app.py` 的 `_INDEX_HTML` 字符串常量中）
+- `GET /translate` — 翻译页 HTML（内联在 `_TRANSLATE_HTML`）
 
-All outbound LLM calls (VLM `_recognize_image`, translation `translate_chunk_stream`, fix `_fix_residual_english`) send three flags to defeat reasoning mode across deployments:
+## 关闭思考模式
+
+所有 LLM 调用（`vlm_recognize_page`、`translate_chunk_stream`、`_fix_residual_english`）均发送以下三个字段以兼容不同部署协议：
 
 ```python
-"enable_thinking": False,                     # Qwen protocol
+"enable_thinking": False,                     # Qwen 协议
 "chat_template_kwargs": {"thinking": False},  # vLLM / SGLang
-"thinking": {"type": "disabled"},             # Kimi official API
+"thinking": {"type": "disabled"},             # Kimi 官方 API
 ```
 
-`translate_chunk_stream` additionally counts `<think>...</think>` content stripped on the fly and `reasoning_content` field length; if either is non-trivial it logs a WARNING per chunk so the user can confirm whether the deployment honored the flags.
+## 依赖
 
-## PaddleOCR-VL Instance Management
+`requirements.txt` 共 7 个包（无本地模型，无 GPU 依赖）：
 
-`get_paddle_ocr_vl(use_mlx)` returns a process-wide singleton, cached per backend in `_paddle_ocr_vl_instances` (`"mlx"` / `"cpu"`) with double-checked locking (`_paddle_ocr_vl_lock`).
+```
+fastapi>=0.115.0
+uvicorn>=0.30.0
+httpx>=0.27.0
+python-dotenv>=1.0.0
+PyMuPDF>=1.24.0
+langdetect>=1.0.9
+python-multipart>=0.0.9
+```
 
-**MLX acceleration (default on, Apple Silicon):** when `use_mlx=True` the instance is built with `vl_rec_backend="mlx-vlm-server"` pointing at a standalone `mlx_vlm.server` (`PADDLE_MLX_SERVER_URL`, model `PADDLE_MLX_MODEL_NAME`). This offloads the slow VLM recognition step to MLX/GPU — benchmarked ~20× faster than CPU on M5 Max (~45s → ~2.2s per page). Doxify itself does NOT load the MLX model; the separate server process does, so the bleeding-edge deps (`mlx-vlm>=0.3.11`, which pulls `transformers>=5` / `huggingface-hub>=1`) live in an isolated venv (`PADDLE_MLX_VENV`, default `~/paddleocr_vl_venv`) and never touch the `mineru` conda env. **Do not install `mlx-vlm>=0.3.11` into the `mineru` env** — it violates MinerU's `transformers<5.0.0` / `mlx-vlm<0.4` pins.
+## 测试
 
-`start.sh` auto-launches the server (with a 30s health check) and tears it down on exit. `parse_pdf_paddleocr` calls `_mlx_server_alive()` per request and **falls back to `device="cpu"` automatically** when the server is unreachable or `PADDLE_MLX_ENABLED=0`. A per-request UI checkbox (`paddle_mlx` form field, default on) and the global `PADDLE_MLX_ENABLED` env both gate it. The `file_start` SSE event carries `backend: "mlx"|"cpu"` so the frontend knows which path ran.
-
-The installed `paddleocr 3.4.0` in the `mineru` env already exposes the `vl_rec_backend` params, so the client needs no upgrade even though the served model is 1.6 (verified: 3.4.0 client + 1.6 server produces correct output).
-
-## MinerU Subprocess
-
-`_run_mineru_sync()` runs in `run_in_executor` (blocking). It writes the PDF to `output/<file_id>/_raw/`, runs the `mineru` CLI, then `_consolidate_md_and_images` walks the output tree, copies all images to `output/<file_id>/images/`, concatenates `.md` files, and rewrites image references to point at the consolidated `images/` folder. The `_raw/` workspace is cleaned up on success.
-
-The subprocess inherits the parent env plus `MINERU_VIRTUAL_VRAM_SIZE` / `MINERU_HYBRID_BATCH_RATIO` / `MINERU_PDF_RENDER_THREADS` / `MINERU_DEVICE_MODE` (via `env.setdefault`). These are required on Apple Silicon — MinerU 3.0.x's `get_vram()` has no MPS branch and otherwise reports 1 GB, forcing `batch_ratio=1` (slowest tier).
-
-## Dependencies
-
-Install into the `mineru` conda environment:
 ```bash
-conda activate mineru
-pip install -r requirements.txt          # fastapi, uvicorn, httpx, python-dotenv, PyMuPDF
-pip install paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-pip install paddleocr
-# MinerU is already installed in the mineru env
+source .venv/bin/activate
+python -m pytest tests/test_strip_watermarks.py -q   # 应输出 12 passed
 ```
+
+测试覆盖 `_strip_watermarks` 函数的各种水印模式。
+
+## 日志
+
+- 控制台实时输出 + `gateway.log`（与 `app.py` 同目录）
+- Logger 名称：`gateway`（不传播至根 logger）
+- `_strip_watermarks` 命中时记 INFO 含 `file_id`
+- 翻译块的 `reasoning_content` 非零时记 WARNING
+
+## 注意事项
+
+- 无认证机制，设计为本地 `127.0.0.1` 使用
+- 输出文件（解析结果）写入 `output/<file_id>/`，已加入 `.gitignore`
+- 品牌标识 "JT&N 金诚同达" 保留于前端 HTML，不得删除

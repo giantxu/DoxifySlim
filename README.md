@@ -1,140 +1,207 @@
-# Doxify
+# DoxifySlim
 
-A local-first FastAPI tool with two features: **PDF → Markdown parsing** and **Markdown translation**. Drag, drop, watch tokens stream in.
+基于 **Kimi 2.6 VLM** 的精简版 PDF→Markdown 解析工具 + Markdown 翻译工具（JT&N 金诚同达内部使用）。
 
 ```
-PDF → [VLM | MinerU | PaddleOCR-VL] → Markdown (+ images)
-       │
-       └── Markdown → chunked parallel translation → translated Markdown
+PDF → Kimi 2.6 VLM（逐页识别）→ Markdown
+                                   │
+                                   └── Markdown → 分块并行翻译 → 译文 Markdown
 ```
 
 ---
 
-## Features
+## 功能
 
-### PDF Parsing (four modes)
+### ① PDF 解析
 
-| Mode | Best for | Engine |
-|---|---|---|
-| **Kimi 2.6 VLM** | Handwriting, complex layouts, mixed text+image | Remote VLM API, page-by-page |
-| **MinerU (text)** | Digital PDFs with embedded text | Local `mineru` CLI subprocess |
-| **MinerU (scan)** | Scanned printed PDFs | Local `mineru` CLI subprocess |
-| **PaddleOCR-VL** | High-accuracy document parsing, tables/formulas | Local VLM inference, chunked |
+- **引擎**：Kimi 2.6 VLM（远程 API），将每页 PDF 转为图片后逐页调用 VLM 识别
+- **实时进度**：SSE 流式推送，浏览器实时显示每页完成情况
+- **两个处理选项**（勾选即生效）：
+  - **去除页眉/页脚水印**：自动剥离 EAPA 风格的 Barcode 头、Filed By 脚水印行
+  - **插入分页标识**：每页 Markdown 之间插入 `--- [第 N 页] ---` 分隔符
+- **结果获取**：页面下方提供"复制 Markdown"和"下载 .md"两个按钮，无 ZIP 打包
+- **多文件并行**：同时拖入多个 PDF，各文件独立并行处理
 
-- Drag-and-drop web UI at `http://127.0.0.1:4000`
-- Real-time per-page progress (VLM / PaddleOCR) or spinner (MinerU)
-- Multiple files processed in parallel via SSE streaming
-- Extracted figures preserved alongside Markdown; downloadable as ZIP
+### ② Markdown 翻译
 
-### Markdown Translation
-
-- Paste text or upload multiple `.md` files
-- All files translated in parallel; **chunks within each file also run in parallel** (bounded by global concurrency cap)
-- Streaming token-by-token output
-- Preserves Markdown formatting, code blocks, tables, and links
-- Automatic residual-English detection with one-shot self-correction
-- Respects Chinese-term-with-English-annotation pattern: `数据空间（dataspace）` stays intact
+- 粘贴文本或上传多个 `.md` 文件
+- 分块并行翻译，流式 token-by-token 输出
+- 自动检测残留英文并一次性修正（`_detect_residual_english` + `_fix_residual_english`）
+- 保留 Markdown 格式、代码块、表格、链接
+- 支持选择目标语言（默认"中文"）
 
 ---
 
-## Requirements
+## 系统要求
 
-- macOS (tested on Apple Silicon M-series)
-- [Miniforge](https://github.com/conda-forge/miniforge) / conda
-- Python 3.10 (in conda env `mineru`)
-- [MinerU](https://github.com/opendatalab/MinerU) installed in the `mineru` conda env
-- An OpenAI-compatible LLM API endpoint (e.g. self-hosted Kimi)
+| 要求 | 说明 |
+|---|---|
+| Python | **3.10 或更高**（3.11 / 3.12 均可） |
+| 操作系统 | macOS 或 Windows |
+| 网络 | 需可访问 Kimi API（或其他 OpenAI 兼容端点） |
+| 模型下载 | **无需下载任何本地模型** |
 
 ---
 
-## Installation
+## 安装
+
+### macOS
 
 ```bash
-# 1. Create conda environment
-conda create -n mineru python=3.10 -y
-conda activate mineru
-
-# 2. Install MinerU (includes its own OCR stack)
-pip install -U "mineru[all]"
-
-# 3. Install Doxify dependencies
-pip install -r requirements.txt
-
-# 4. Install PaddleOCR-VL (optional, for PaddleOCR mode)
-pip install paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
-pip install paddleocr
-
-# 5. Configure environment
-cp .env.example .env
-# Edit .env and fill in your LLM API URL and key
+bash install.sh
 ```
 
+### Windows
+
+双击 `install.bat`，或在命令提示符中运行：
+
+```cmd
+install.bat
+```
+
+脚本会自动：
+
+1. 检测 Python 3.10+（不满足时提示华为云下载地址）
+2. 创建虚拟环境 `.venv`
+3. 从国内镜像安装依赖（**阿里云 → 清华 → 中科大** 自动回退，无需手动配置）
+4. 初始化 `.env`（首次运行时从 `.env.example` 复制）
+
+> 如果所有镜像均失败，可手动安装：
+> ```bash
+> source .venv/bin/activate   # macOS
+> # .venv\Scripts\activate.bat  # Windows
+> pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+> ```
+
 ---
 
-## Configuration
+## 配置
 
-Copy `.env.example` to `.env` and set:
+编辑项目根目录的 `.env` 文件（安装后自动生成）：
 
-| Variable | Default | Description |
+```dotenv
+TARGET_API_URL=https://your-api-endpoint.com/v1/chat/completions
+TARGET_API_KEY=your_api_key_here
+ACTUAL_MODEL_NAME=kimi26
+```
+
+**必填项**：`TARGET_API_URL`、`TARGET_API_KEY`、`ACTUAL_MODEL_NAME`
+
+**可选项**（已有合理默认值，一般无需修改）：
+
+| 变量 | 默认值 | 说明 |
 |---|---|---|
-| `TARGET_API_URL` | — | OpenAI-compatible chat completions endpoint |
-| `TARGET_API_KEY` | — | API key for the target LLM |
-| `ACTUAL_MODEL_NAME` | `kimi26` | Model name used for VLM and translation |
-| `GATEWAY_PORT` | `4000` | Service listening port |
-| `PDF_DPI` | `200` | PDF → image resolution (higher = slower but clearer) |
-| `CONCURRENCY` | `5` | VLM parallel workers per file |
-| `MAX_CONCURRENT_REQUESTS` | `8` | Global cap on simultaneous LLM API requests |
-| `MINERU_TIMEOUT` | `600` | Timeout for MinerU subprocess (seconds) |
-| `LOCAL_OCR_CONCURRENCY` | `4` | PaddleOCR parallel pages (4 recommended for M-series) |
-| `TRANSLATE_CHUNK_CHARS` | `3000` | Max characters per translation chunk |
-| `TRANSLATE_TARGET_LANG` | `中文` | Default translation target language |
+| `GATEWAY_PORT` | `4000` | 服务监听端口 |
+| `LLM_TIMEOUT` | `300` | LLM 请求总超时（秒） |
+| `PAGE_TIMEOUT` | `120` | 单页 VLM 识别超时（秒） |
+| `PDF_DPI` | `200` | PDF→图片分辨率（越高越清晰但越慢） |
+| `CONCURRENCY` | `5` | 单文件内并发 Worker 数 |
+| `CONCURRENCY_THRESHOLD` | `10` | 启用并发的最小页数 |
+| `MAX_CONCURRENT_REQUESTS` | `8` | 全局最大同时 API 请求数 |
+| `TRANSLATE_CHUNK_CHARS` | `3000` | 每块最大翻译字符数 |
+| `TRANSLATE_TARGET_LANG` | `中文` | 默认翻译目标语言 |
 
 ---
 
-## Usage
+## 启动
+
+### macOS
 
 ```bash
 bash start.sh
 ```
 
-| Access point | URL |
+### Windows
+
+双击 `start.bat`，或在命令提示符中运行 `start.bat`。
+
+### 直接启动（任意平台，已激活 venv）
+
+```bash
+source .venv/bin/activate   # macOS
+python app.py
+```
+
+浏览器访问：
+
+| 功能 | 地址 |
 |---|---|
-| PDF parsing web UI | `http://127.0.0.1:4000` |
-| Markdown translation web UI | `http://127.0.0.1:4000/translate` |
+| PDF 解析 | `http://127.0.0.1:4000` |
+| Markdown 翻译 | `http://127.0.0.1:4000/translate` |
+| 健康检查 | `http://127.0.0.1:4000/health` |
 
 ---
 
-## Architecture
+## 使用说明
 
-Single-file FastAPI app (`app.py`). Two functional areas:
+### PDF 解析页（`/`）
 
-**PDF parsing** (`POST /parse_pdf_stream`, SSE)
-Parallel tasks per file → shared `asyncio.Queue` → single SSE connection.
-Event sequence: `init` → `file_start` → `page_done` × N → `file_done`
-Output persisted under `output/<file_id>/` for ZIP download via `GET /download_zip/{file_id}`.
+1. 将一个或多个 PDF 拖入上传区（或点击选择）
+2. 按需勾选处理选项：
+   - ☑ **去除页眉/页脚水印**：剔除 EAPA 文件中的 Barcode / Filed By 水印行
+   - ☑ **插入分页标识**：每页之间插入分隔符，便于对照原件
+3. 点击"开始解析"，等待进度条逐页更新
+4. 完成后点击"**复制 Markdown**"或"**下载 .md**"获取结果
 
-**Markdown translation** (`POST /translate_stream`, SSE)
-All files launched as concurrent tasks; chunks within each file fan out in parallel, bounded by `MAX_CONCURRENT_REQUESTS`.
-Event sequence: `init` → `file_start` → (`chunk_start` → `chunk_token`... → `chunk_done` [→ `chunk_replace` if residual English fixed]) × N → `file_done` → `all_done`
+### Markdown 翻译页（`/translate`）
 
----
-
-## Known Limitations
-
-- **PaddleOCR server models unavailable on macOS ARM** — Bus error 10 on CPU mode; mobile models are used instead (slightly lower accuracy)
-- **MinerU has no per-page progress** — processed as a black-box CLI; only a spinner is shown
-- **MinerU internal OCR is fixed to `ch_lite`** — hardcoded in MinerU's CPU path; cannot be overridden
-- **No authentication** — designed for local `127.0.0.1` use only
+1. 在文本框粘贴 Markdown 内容，或上传 `.md` 文件（支持多选）
+2. 选择目标语言（默认"中文"）
+3. 点击"开始翻译"，流式实时显示译文
+4. 翻译完成后复制或下载结果
 
 ---
 
-## File Structure
+## 常见问题
+
+**Q：Python 未安装或版本过低？**  
+A：请从华为云镜像下载 Python 3.12 安装包：  
+`https://mirrors.huaweicloud.com/python/`
+
+**Q：pip 安装慢或报错？**  
+A：`install.sh` / `install.bat` 已内置阿里云/清华/中科大多镜像自动回退。若仍失败，手动指定：  
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+```
+
+**Q：端口 4000 已被占用？**  
+A：编辑 `.env`，将 `GATEWAY_PORT` 改为其他端口（如 `4001`），重启服务即生效。
+
+**Q：API 报错（401 / 403 / 连接超时）？**  
+A：检查 `.env` 中的 `TARGET_API_URL`、`TARGET_API_KEY`、`ACTUAL_MODEL_NAME` 是否正确，以及网络是否可访问该端点。
+
+**Q：解析结果有页眉/页脚杂项行？**  
+A：在解析页勾选"去除页眉/页脚水印"选项后重新解析。
+
+---
+
+## 文件结构
 
 ```
-.
-├── app.py              # All business logic
-├── start.sh            # One-command startup script
-├── requirements.txt    # pip dependencies (excludes PaddlePaddle/PaddleOCR)
-├── .env.example        # Configuration template
-└── output/             # Per-file parsed results (gitignored)
+DoxifySlim/
+├── app.py              # 全部业务逻辑（FastAPI 单文件应用）
+├── requirements.txt    # 7 个 pip 依赖（无需安装模型）
+├── .env.example        # 配置模板（install 脚本自动复制为 .env）
+├── install.sh          # macOS 安装脚本
+├── install.bat         # Windows 安装脚本
+├── start.sh            # macOS 启动脚本
+├── start.bat           # Windows 启动脚本
+├── static/             # 静态资产（品牌 logo 等）
+└── tests/              # 单元测试
 ```
+
+---
+
+## 技术说明
+
+- 单文件 FastAPI 应用，`python app.py` 启动，无需额外构建步骤
+- PDF→图片：PyMuPDF（`fitz`），DPI 可配
+- VLM 识别：每页独立 HTTP 请求，最多 3 次自动重试，超时递增 50%
+- 翻译分块：按 `TRANSLATE_CHUNK_CHARS` 在自然段落边界切块，各块并行，结果合并后输出
+- 全局信号量 `_api_semaphore` 限制同时发出的 API 请求数，防止触发 API 速率限制
+- 日志写入 `gateway.log`（同目录）
+
+---
+
+*JT&N 金诚同达*
