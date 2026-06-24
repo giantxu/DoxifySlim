@@ -1,9 +1,8 @@
 """
-Doxify — PDF → Markdown 解析 + Markdown 翻译工具
+Doxify Slim — PDF → Markdown 解析 + Markdown 翻译工具
 
 功能：
-1. PDF 解析：四种模式（VLM 远程 / MinerU 文字版 / MinerU 扫描版 / PaddleOCR-VL），
-   带逐页进度，输出 Markdown + 图片 ZIP 打包下载
+1. PDF 解析：Kimi 2.6 VLM（远程 API），带逐页进度，输出 Markdown（图片内嵌 base64）
 2. Markdown 翻译：分块并行流式翻译，含残留英文自动检测与修正
 
 启动方式：python app.py
@@ -12,18 +11,11 @@ Doxify — PDF → Markdown 解析 + Markdown 翻译工具
 import os
 import base64
 import asyncio
-import io
 import logging
 import json
 import re
-import shutil
-import subprocess
-import tempfile
-import threading
 import uuid
-import zipfile
 from pathlib import Path
-from urllib.parse import quote
 
 import fitz  # PyMuPDF
 import httpx
@@ -54,52 +46,14 @@ MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "8"))
 TRANSLATE_CHUNK_CHARS = int(os.getenv("TRANSLATE_CHUNK_CHARS", "3000"))
 # 翻译：默认目标语言
 TRANSLATE_TARGET_LANG = os.getenv("TRANSLATE_TARGET_LANG", "中文")
-# MinerU 本地处理超时（秒）
-MINERU_TIMEOUT = int(os.getenv("MINERU_TIMEOUT", "1800"))
-# MinerU 性能调优：MinerU 3.0.x 在 Apple Silicon 上无法识别 MPS 显存，会回落到
-# batch_ratio=1（最慢档）。下列变量在子进程启动时注入，让其按统一内存机器调度。
-# 详见 mineru/utils/model_utils.py: get_vram()  +  pipeline_analyze.py / hybrid_analyze.py
-MINERU_VIRTUAL_VRAM_SIZE = os.getenv("MINERU_VIRTUAL_VRAM_SIZE", "32")  # GB，→ batch_ratio=16
-MINERU_HYBRID_BATCH_RATIO = os.getenv("MINERU_HYBRID_BATCH_RATIO", "16")  # hybrid 后端直接指定
-MINERU_PDF_RENDER_THREADS = os.getenv("MINERU_PDF_RENDER_THREADS", "8")  # PDF→图片线程
-MINERU_DEVICE_MODE = os.getenv("MINERU_DEVICE_MODE", "mps")  # M-series 用 mps；Intel/无 GPU 改 cpu
-# 本地 OCR 并发数（PaddleOCR 逐页并发上限）
-LOCAL_OCR_CONCURRENCY = int(os.getenv("LOCAL_OCR_CONCURRENCY", "4"))
-
-# PaddleOCR-VL 块间并发数：多个 PDF 块同时处理（共享单例，实测线程安全）。
-# MLX 路径下单 GPU 是瓶颈、块内已并发，块间并发主要重叠版面检测(CPU)+填满 server 队列，
-# 实测约 1.2× 提速；调大收益递减。CPU 回退路径下建议设为 1（CPU 已被单块吃满）。
-PADDLE_VL_CONCURRENCY = int(os.getenv("PADDLE_VL_CONCURRENCY", "3"))
-
-# ── PaddleOCR-VL MLX 加速（Apple Silicon）──
-# 把最慢的 VLM 识别环节卸载到独立的 mlx_vlm.server 进程（MLX/GPU），实测约 20× 快于 CPU。
-# Doxify 自身不加载 MLX 模型，只通过 vl_rec_backend="mlx-vlm-server" 把识别请求转发给该 server，
-# 因此激进依赖（mlx-vlm>=0.3.11 等）全部隔离在独立 venv 里，不污染 mineru 环境。
-# server 不可达时本模块自动回退到 device="cpu"。server 由 start.sh 自动拉起，见 .env。
-PADDLE_MLX_ENABLED = os.getenv("PADDLE_MLX_ENABLED", "1") == "1"
-_PADDLE_MLX_PORT = os.getenv("PADDLE_MLX_SERVER_PORT", "8111")
-PADDLE_MLX_SERVER_URL = os.getenv("PADDLE_MLX_SERVER_URL", f"http://127.0.0.1:{_PADDLE_MLX_PORT}/")
-PADDLE_MLX_MODEL_NAME = os.getenv("PADDLE_MLX_MODEL_NAME", "PaddlePaddle/PaddleOCR-VL-1.6")
-
-# mlx-vlm-server 后端不支持 min_pixels/max_pixels（这两个参数只对进程内 paddle 后端有效，
-# 用于限制送入 VLM 的图片分辨率）。MLX 路径下 paddlex 会对每个识别块各警告一次，纯噪音、
-# 不影响结果，这里按消息精确静音。
-import warnings as _warnings
-_warnings.filterwarnings("ignore", message=r".*does not support `min_pixels`.*")
-_warnings.filterwarnings("ignore", message=r".*does not support `max_pixels`.*")
-
-# 解析输出根目录：每个 file_id 一个子目录，存 .md + images/，供 ZIP 下载
-OUTPUT_DIR = Path(__file__).parent / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateway.log")
 
 # 直接在 gateway logger 上挂 handlers，不依赖根 logger。
-# PaddlePaddle 初始化时会覆盖根 logger 的 handlers，导致 basicConfig 方式失效。
 _log_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("gateway")
 log.setLevel(logging.INFO)
-log.propagate = False  # 隔离根 logger，防止 PaddlePaddle 干扰
+log.propagate = False
 if not log.handlers:
     _sh = logging.StreamHandler()
     _sh.setFormatter(_log_fmt)
@@ -118,9 +72,6 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 # 全局信号量：限制同时发出的 VLM API 请求数
 _api_semaphore: asyncio.Semaphore | None = None
-# PaddleOCR-VL 单例实例（按后端缓存："mlx" / "cpu" 各一个）
-_paddle_ocr_vl_instances: dict[str, object] = {}
-_paddle_ocr_vl_lock = threading.Lock()
 
 @app.on_event("startup")
 async def _init_semaphore():
@@ -383,509 +334,6 @@ async def parse_pdf_streaming(
                      "chars": len(full_md), "markdown": full_md})
 
 
-# ---------------------------------------------------------------------------
-# 本地处理：MinerU（文字版 / 扫描版）
-# ---------------------------------------------------------------------------
-
-# Markdown 图片引用正则：![alt](path.ext) ，path 必须以常见图片扩展名结尾
-_IMG_EXTS = ("jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "svg")
-_IMG_REF_RE = re.compile(
-    r"!\[([^\]]*)\]\(([^)\s]+?\.(?:" + "|".join(_IMG_EXTS) + r"))\)",
-    re.IGNORECASE,
-)
-# PaddleOCR-VL 1.6 用 HTML <img src="imgs/xxx.jpg"> 输出图片（非 markdown 语法），
-# 需单独重写 src。捕获 src= 前缀、引号、路径，便于原样保留标签其余部分。
-_HTML_IMG_SRC_RE = re.compile(
-    r"(<img\b[^>]*?\bsrc\s*=\s*)([\"'])(.*?)\2",
-    re.IGNORECASE,
-)
-
-
-def _consolidate_md_and_images(
-    source_dir: Path, result_dir: Path, prefix: str = "",
-    separator: str = "\n\n---\n\n",
-) -> tuple[str, int]:
-    """递归扫描 source_dir，把所有图片汇总到 result_dir/images/，把所有 .md 内的
-    图片引用重写为 images/<name>，再拼接所有 .md 返回。
-
-    prefix: 给图片文件名加前缀以避免不同来源的同名冲突（如 PaddleOCR-VL 多 chunk）。
-    返回 (合并后的 markdown, 实际复制的图片数)。
-    """
-    images_dir = result_dir / "images"
-    images_dir.mkdir(parents=True, exist_ok=True)
-
-    # 收集所有图片，建立 basename -> new_basename 映射
-    img_paths: list[Path] = []
-    for ext in _IMG_EXTS:
-        img_paths.extend(source_dir.rglob(f"*.{ext}"))
-        img_paths.extend(source_dir.rglob(f"*.{ext.upper()}"))
-
-    # 去重（rglob 大小写两次可能命中同一文件，APFS 默认大小写不敏感）
-    seen_paths: set[Path] = set()
-    unique_imgs: list[Path] = []
-    for p in img_paths:
-        rp = p.resolve()
-        if rp not in seen_paths:
-            seen_paths.add(rp)
-            unique_imgs.append(p)
-
-    name_map: dict[str, str] = {}
-    copied = 0
-    for src in unique_imgs:
-        target_name = f"{prefix}{src.name}" if prefix else src.name
-        dst = images_dir / target_name
-        if dst.exists():
-            # 同名同大小视作同文件，跳过；否则加数字后缀
-            if dst.stat().st_size == src.stat().st_size:
-                name_map[src.name] = dst.name
-                continue
-            stem, ext = os.path.splitext(target_name)
-            n = 1
-            while (images_dir / f"{stem}_{n}{ext}").exists():
-                n += 1
-            dst = images_dir / f"{stem}_{n}{ext}"
-        shutil.copy2(src, dst)
-        copied += 1
-        name_map[src.name] = dst.name
-
-    # 收集并合并所有 .md
-    md_files = sorted(p for p in source_dir.rglob("*.md") if "content_list" not in p.name)
-
-    def _rewrite(match: re.Match) -> str:
-        alt, path = match.group(1), match.group(2)
-        if path.startswith(("http://", "https://", "data:")):
-            return match.group(0)
-        base = os.path.basename(path)
-        new_base = name_map.get(base, base)
-        return f"![{alt}](images/{new_base})"
-
-    def _rewrite_html_img(match: re.Match) -> str:
-        prefix, quote, path = match.group(1), match.group(2), match.group(3)
-        if path.startswith(("http://", "https://", "data:")):
-            return match.group(0)
-        base = os.path.basename(path)
-        new_base = name_map.get(base, base)
-        return f"{prefix}{quote}images/{new_base}{quote}"
-
-    parts: list[str] = []
-    for md in md_files:
-        try:
-            text = md.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            text = md.read_text(encoding="utf-8", errors="replace")
-        text = _IMG_REF_RE.sub(_rewrite, text)
-        text = _HTML_IMG_SRC_RE.sub(_rewrite_html_img, text)
-        parts.append(text)
-
-    return (separator.join(parts), copied)
-
-
-def _safe_doc_stem(filename: str) -> str:
-    """从用户上传的文件名取一个用于落盘的 stem（保留中文，剔除路径分隔符）。"""
-    stem = Path(filename).stem or "document"
-    # 防止用户文件名里有路径字符
-    return re.sub(r'[\\/:*?"<>|]', "_", stem)
-
-
-def _normalize_vlm_latex(md: str) -> str:
-    """把 PaddleOCR-VL（尤其 1.6 模型）用行内 LaTeX 表达的排版语义转成通用 HTML 标签，
-    避免在不支持数学公式的 Markdown 查看器里显示成原始 LaTeX。
-
-    - $\\underline{\\text{X}}$ / $\\underline{X}$ → <u>X</u>（下划线文本）
-    - $^{N}$ → <sup>N</sup>（上标，如脚注角标）
-    - $_{N}$ → <sub>N</sub>（下标）
-
-    仅处理这几种纯排版用法；真正的数学公式（含运算符等）不受影响。
-    """
-    md = re.sub(r"\$\s*\\underline\{\\text\{(.*?)\}\}\s*\$", r"<u>\1</u>", md)
-    md = re.sub(r"\$\s*\\underline\{(.*?)\}\s*\$", r"<u>\1</u>", md)
-    md = re.sub(r"\$\s*\^\{(.*?)\}\s*\$", r"<sup>\1</sup>", md)
-    md = re.sub(r"\$\s*_\{(.*?)\}\s*\$", r"<sub>\1</sub>", md)
-    return md
-
-
-# 剥掉 loguru 风格的 "YYYY-MM-DD HH:MM:SS.SSS | LEVEL | module:fn:line - " 前缀，
-# 让前端展示的进度行更紧凑。匹配失败时返回原始行。
-_MINERU_LOG_PREFIX_RE = re.compile(
-    r"^\s*\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2}[\.,]?\d*\s*\|\s*\w+\s*\|\s*[\w\.\-:]+\s*-\s*"
-)
-
-
-def _clean_mineru_line(line: str) -> str:
-    return _MINERU_LOG_PREFIX_RE.sub("", line).strip() or line.strip()
-
-
-def _run_mineru_sync(pdf_bytes: bytes, filename: str, method: str, file_id: str,
-                     strip_watermark: bool = True, progress_cb=None,
-                     page_markers: bool = True) -> tuple[str, bool]:
-    """调用 mineru CLI 解析 PDF，落盘到 output/<file_id>/，返回 (markdown 文本, 是否含图片)。
-
-    持久化目的：把 MinerU 抽取的 images/ 保留下来，供前端 ZIP 下载。
-    progress_cb: 可选的回调，每行 mineru 输出调用一次（已剥前缀）。会在 reader 线程里执行，
-                 调用方负责把它路由回 asyncio 事件循环（见 parse_pdf_mineru）。
-    """
-    result_dir = OUTPUT_DIR / file_id
-    result_dir.mkdir(parents=True, exist_ok=True)
-    # MinerU 输出落地区，待合并后清理；合并后只留 result_dir/<stem>.md + result_dir/images/
-    work_dir = result_dir / "_raw"
-    if work_dir.exists():
-        shutil.rmtree(work_dir, ignore_errors=True)
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    safe = filename.replace(" ", "_")
-    pdf_path = work_dir / safe
-    pdf_path.write_bytes(pdf_bytes)
-    # 注入性能调优环境变量（外部已设置的不覆盖）
-    env = os.environ.copy()
-    env.setdefault("MINERU_VIRTUAL_VRAM_SIZE", MINERU_VIRTUAL_VRAM_SIZE)
-    env.setdefault("MINERU_HYBRID_BATCH_RATIO", MINERU_HYBRID_BATCH_RATIO)
-    env.setdefault("MINERU_PDF_RENDER_THREADS", MINERU_PDF_RENDER_THREADS)
-    env.setdefault("MINERU_DEVICE_MODE", MINERU_DEVICE_MODE)
-    # 关闭 tqdm 的 ANSI/颜色，避免输出里混控制字符
-    env.setdefault("PYTHONUNBUFFERED", "1")
-    env.setdefault("NO_COLOR", "1")
-    # 强制 pipeline 后端：避开 hybrid-auto-engine 在 Apple Silicon 上的 mlx-engine 大文档崩溃问题。
-    # pipeline 只用传统 layout + OCR + 公式检测，内存稳定；hybrid-auto-engine 会拉 Qwen2-VL，
-    # 跑超过几百页时 worker 进程会无痕崩溃（参见 git history 中关于 547 页德语 PDF 的诊断）。
-    log.info("MinerU 启动: %s -b pipeline --method %s -> %s | vram=%s batch_ratio=%s render_threads=%s device=%s timeout=%ds",
-             safe, method, result_dir,
-             env["MINERU_VIRTUAL_VRAM_SIZE"], env["MINERU_HYBRID_BATCH_RATIO"],
-             env["MINERU_PDF_RENDER_THREADS"], env["MINERU_DEVICE_MODE"], MINERU_TIMEOUT)
-
-    # 滚动保留最近若干行用于报错诊断
-    output_tail: list[str] = []
-    proc: subprocess.Popen | None = None
-    try:
-        proc = subprocess.Popen(
-            ["mineru", "-p", str(pdf_path), "-o", str(work_dir),
-             "-b", "pipeline", "--method", method],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
-
-        def _pump_output() -> None:
-            try:
-                assert proc is not None and proc.stdout is not None
-                for raw in proc.stdout:
-                    line = raw.rstrip()
-                    if not line:
-                        continue
-                    log.info("[mineru:%s] %s", file_id[:8], line)
-                    output_tail.append(line)
-                    if len(output_tail) > 200:
-                        del output_tail[:100]
-                    if progress_cb is not None:
-                        try:
-                            progress_cb(_clean_mineru_line(line))
-                        except Exception:
-                            pass
-            except Exception:
-                log.exception("MinerU 输出读取异常")
-
-        reader = threading.Thread(target=_pump_output, daemon=True)
-        reader.start()
-
-        try:
-            rc = proc.wait(timeout=MINERU_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                pass
-            reader.join(timeout=5)
-            tail = "\n".join(output_tail[-30:])
-            raise RuntimeError(
-                f"MinerU 超时（{MINERU_TIMEOUT}s），已被终止。最后输出：\n{tail}"
-            )
-
-        reader.join(timeout=5)
-        if rc != 0:
-            tail = "\n".join(output_tail[-30:])
-            raise RuntimeError(f"MinerU 退出码 {rc}。最后输出：\n{tail[:1500]}")
-
-        _sep = "\n\n---\n\n" if page_markers else "\n\n"
-        combined_md, img_count = _consolidate_md_and_images(work_dir, result_dir, separator=_sep)
-        if not combined_md.strip():
-            combined_md = "[MinerU 未生成 Markdown 文件]"
-        combined_md = _strip_watermarks(combined_md, strip_watermark, file_id)
-
-        # 用原始文件名写最终 .md（ZIP 下载时呈现给用户）
-        final_md = result_dir / f"{_safe_doc_stem(filename)}.md"
-        final_md.write_text(combined_md, encoding="utf-8")
-        log.info("[MinerU] %s: %d 张图片, %d 字符 -> %s",
-                 filename, img_count, len(combined_md), final_md)
-        return combined_md, img_count > 0
-    finally:
-        # 防御：如果出现异常但子进程还活着，确保被回收
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.kill()
-                proc.wait(timeout=5)
-            except Exception:
-                pass
-        shutil.rmtree(work_dir, ignore_errors=True)
-
-
-async def parse_pdf_mineru(
-    pdf_bytes: bytes,
-    filename: str,
-    file_id: str,
-    queue: asyncio.Queue,
-    method: str = "txt",
-    strip_watermark: bool = True,
-    page_markers: bool = True,
-) -> None:
-    """调用本地 MinerU CLI 解析 PDF。total=0 表示不定进度（整体黑盒）。
-    通过 progress_cb 实时把 mineru 的每行输出转发给前端 SSE。"""
-    loop = asyncio.get_event_loop()
-    await queue.put({"type": "file_start", "file_id": file_id,
-                     "filename": filename, "total": 0, "mode": f"mineru_{method}"})
-
-    def _on_progress(message: str) -> None:
-        # 在 reader 线程中调用；用 call_soon_threadsafe 把事件投递回事件循环
-        msg = message[:200] if message else ""
-        if not msg:
-            return
-        try:
-            loop.call_soon_threadsafe(
-                queue.put_nowait,
-                {"type": "file_progress", "file_id": file_id,
-                 "filename": filename, "message": msg},
-            )
-        except RuntimeError:
-            # 事件循环已关闭：忽略
-            pass
-
-    try:
-        md, has_images = await loop.run_in_executor(
-            None, _run_mineru_sync, pdf_bytes, filename, method, file_id,
-            strip_watermark, _on_progress, page_markers,
-        )
-        log.info("[%s] MinerU 完成: %d 字符, has_images=%s", file_id, len(md), has_images)
-        await queue.put({"type": "file_done", "file_id": file_id,
-                         "filename": filename, "pages": 0,
-                         "chars": len(md), "markdown": md,
-                         "has_images": has_images})
-    except Exception as e:
-        log.exception("MinerU 处理失败: %s", filename)
-        await queue.put({"type": "file_error", "file_id": file_id,
-                         "filename": filename, "error": str(e)})
-
-
-# ---------------------------------------------------------------------------
-# 本地处理：PaddleOCR-VL（VLM 文档解析，含表格/公式/图表）
-# ---------------------------------------------------------------------------
-
-# 每块页数。注意：PaddleOCR-VL 默认 max_num_input_imgs=100，单次 predict() 超过 100 页的
-# 部分会被静默丢弃（见百度 AI Studio API 文档）。这里按 3 页切块，天然规避该限制——
-# 不要把此值改到 >100，否则尾页会丢失。
-PADDLEOCR_VL_CHUNK_PAGES = 3
-
-
-def _mlx_server_alive(url: str | None = None) -> bool:
-    """探测 mlx_vlm.server 是否在线：直接对 host:port 建 TCP 连接。
-
-    用裸 socket 而非 HTTP，是为了免疫系统/环境代理——urllib 可能把对 127.0.0.1 的请求
-    也走代理并返回一个 HTTP 错误页，从而把“没人监听”误判成“在线”。TCP 直连只看端口是否可达。
-    """
-    import socket
-    from urllib.parse import urlparse
-    p = urlparse(url or PADDLE_MLX_SERVER_URL)
-    host = p.hostname or "127.0.0.1"
-    port = p.port or 80
-    try:
-        with socket.create_connection((host, port), timeout=2):
-            return True
-    except Exception:
-        return False
-
-
-def get_paddle_ocr_vl(use_mlx: bool = False):
-    """获取 PaddleOCR-VL 单例（懒初始化 + 双重检查锁，按后端分别缓存）。
-
-    use_mlx=True 时走 mlx-vlm-server 后端（Apple Silicon GPU，实测约 20× 快于 CPU）；
-    否则用纯 CPU。调用方应先用 _mlx_server_alive() 判断 server 是否可达再决定 use_mlx。
-    """
-    key = "mlx" if use_mlx else "cpu"
-    inst = _paddle_ocr_vl_instances.get(key)
-    if inst is None:
-        with _paddle_ocr_vl_lock:
-            inst = _paddle_ocr_vl_instances.get(key)
-            if inst is None:
-                from paddleocr import PaddleOCRVL
-                if use_mlx:
-                    log.info("初始化 PaddleOCR-VL 实例 (mlx-vlm-server: %s, model=%s)",
-                             PADDLE_MLX_SERVER_URL, PADDLE_MLX_MODEL_NAME)
-                    inst = PaddleOCRVL(
-                        vl_rec_backend="mlx-vlm-server",
-                        vl_rec_server_url=PADDLE_MLX_SERVER_URL,
-                        vl_rec_api_model_name=PADDLE_MLX_MODEL_NAME,
-                    )
-                else:
-                    log.info("初始化 PaddleOCR-VL 实例 (device=cpu)")
-                    inst = PaddleOCRVL(device="cpu")
-                _paddle_ocr_vl_instances[key] = inst
-    return inst
-
-
-def _split_pdf_chunk(pdf_bytes: bytes, start_page: int, end_page: int) -> bytes:
-    """从 PDF 中提取 [start_page, end_page)（0 索引）生成新的 PDF bytes。"""
-    src = fitz.open(stream=pdf_bytes, filetype="pdf")
-    dst = fitz.open()
-    dst.insert_pdf(src, from_page=start_page, to_page=end_page - 1)
-    return dst.tobytes()
-
-
-def _run_paddleocr_vl_chunk_sync(chunk_bytes: bytes, stem: str, chunk_idx: int,
-                                   start_page: int, end_page: int, file_id: str,
-                                   use_mlx: bool = False) -> str:
-    """用 PaddleOCR-VL 解析单个 PDF 块（同步阻塞，在 executor 中运行）。
-
-    输出落盘到 output/<file_id>/_chunks/chunk_<idx>/output/，等所有块完成后由调用方
-    统一合并到 output/<file_id>/。
-    """
-    import time
-
-    pipeline = get_paddle_ocr_vl(use_mlx=use_mlx)
-    t0 = time.time()
-    chunk_root = OUTPUT_DIR / file_id / "_chunks" / f"chunk_{chunk_idx:03d}"
-    if chunk_root.exists():
-        shutil.rmtree(chunk_root, ignore_errors=True)
-    chunk_root.mkdir(parents=True, exist_ok=True)
-
-    pdf_path = chunk_root / f"{stem}_c{chunk_idx}.pdf"
-    out_dir = chunk_root / "output"
-    out_dir.mkdir(exist_ok=True)
-    pdf_path.write_bytes(chunk_bytes)
-
-    pages_res = list(pipeline.predict(str(pdf_path)))
-    if not pages_res:
-        log.warning("[PaddleOCR-VL] 块 %d（第 %d-%d 页）返回空结果",
-                    chunk_idx, start_page + 1, end_page)
-        return ""
-
-    restructured = pipeline.restructure_pages(
-        pages_res,
-        merge_tables=True,
-        relevel_titles=True,
-        concatenate_pages=True,
-    )
-    for res in restructured:
-        res.save_to_markdown(save_path=str(out_dir))
-
-    md_files = sorted(out_dir.rglob("*.md"))
-    elapsed = time.time() - t0
-    log.info("[PaddleOCR-VL] 块 %d（第 %d-%d 页）完成，耗时 %.1fs，%d 个 .md",
-             chunk_idx, start_page + 1, end_page, elapsed, len(md_files))
-    if not md_files:
-        return ""
-    # 返回的是块的原始 md（含相对图片引用），仅用于前端实时进度展示；
-    # file_done 时调用方会用合并后的 md 覆盖之。
-    return _normalize_vlm_latex("\n\n".join(p.read_text(encoding="utf-8") for p in md_files))
-
-
-async def parse_pdf_paddleocr(
-    pdf_bytes: bytes,
-    filename: str,
-    file_id: str,
-    queue: asyncio.Queue,
-    lang: str = "ch",  # 保留参数以兼容 task_map，VL 模式不使用
-    strip_watermark: bool = True,
-    use_mlx: bool = True,  # 请求是否希望用 MLX 加速；server 不可达时自动回退 CPU
-    page_markers: bool = True,
-) -> None:
-    """用 PaddleOCR-VL 解析 PDF，按块处理，有实时逐块进度。"""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    total_pages = len(doc)
-    doc.close()
-
-    chunk_size = PADDLEOCR_VL_CHUNK_PAGES
-    num_chunks = (total_pages + chunk_size - 1) // chunk_size
-    stem = Path(filename).stem or "doc"
-    loop = asyncio.get_event_loop()
-
-    # 决定实际后端：请求要 MLX 且全局开关开 且 server 可达，才用 MLX，否则回退 CPU。
-    mlx_active = bool(use_mlx) and PADDLE_MLX_ENABLED and _mlx_server_alive()
-    if use_mlx and PADDLE_MLX_ENABLED and not mlx_active:
-        log.warning("[%s] PaddleOCR-VL: 请求 MLX 但 server (%s) 不可达，回退 CPU",
-                    file_id, PADDLE_MLX_SERVER_URL)
-    backend = "mlx" if mlx_active else "cpu"
-
-    log.info("[%s] PaddleOCR-VL 启动: %s, %d 页, %d 块（每块 %d 页），后端=%s",
-             file_id, filename, total_pages, num_chunks, chunk_size, backend)
-    await queue.put({"type": "file_start", "file_id": file_id,
-                     "filename": filename, "total": num_chunks, "mode": "paddleocr",
-                     "backend": backend})
-
-    result_dir = OUTPUT_DIR / file_id
-    result_dir.mkdir(parents=True, exist_ok=True)
-
-    # 块间并发：MLX 路径用 PADDLE_VL_CONCURRENCY；CPU 回退降为 1（单块已吃满 CPU）。
-    concurrency = max(1, PADDLE_VL_CONCURRENCY if mlx_active else 1)
-    concurrency = min(concurrency, num_chunks)
-    sem = asyncio.Semaphore(concurrency)
-    chunk_markdowns: list[str] = [""] * num_chunks
-    done_count = 0
-
-    async def _process_chunk(chunk_idx: int) -> None:
-        nonlocal done_count
-        start = chunk_idx * chunk_size
-        end = min(start + chunk_size, total_pages)
-        chunk_bytes = _split_pdf_chunk(pdf_bytes, start, end)
-        async with sem:
-            log.info("[%s] PaddleOCR-VL 开始块 %d/%d（第 %d-%d 页）",
-                     file_id, chunk_idx + 1, num_chunks, start + 1, end)
-            chunk_md = await loop.run_in_executor(
-                None, _run_paddleocr_vl_chunk_sync, chunk_bytes, stem,
-                chunk_idx + 1, start, end, file_id, mlx_active,
-            )
-        # 完成顺序可能乱序，但按 chunk_idx 回填保证最终顺序；前端按 page 键存储亦不受影响。
-        chunk_markdowns[chunk_idx] = chunk_md
-        done_count += 1
-        await queue.put({"type": "page_done", "file_id": file_id,
-                         "page": chunk_idx + 1, "text": chunk_md,
-                         "done": done_count, "total": num_chunks})
-
-    try:
-        log.info("[%s] PaddleOCR-VL 块间并发度=%d", file_id, concurrency)
-        await asyncio.gather(*(_process_chunk(i) for i in range(num_chunks)))
-
-        # 合并所有 chunk 的 md + 图片到 result_dir/，重写图片引用
-        chunks_root = result_dir / "_chunks"
-        _sep = "\n\n---\n\n" if page_markers else "\n\n"
-        try:
-            full_md, img_count = await loop.run_in_executor(
-                None, _consolidate_md_and_images, chunks_root, result_dir, "", _sep
-            )
-        finally:
-            shutil.rmtree(chunks_root, ignore_errors=True)
-        if not full_md.strip():
-            full_md = _sep.join(m for m in chunk_markdowns if m.strip())
-        full_md = _normalize_vlm_latex(full_md)
-        full_md = _strip_watermarks(full_md, strip_watermark, file_id)
-
-        final_md = result_dir / f"{_safe_doc_stem(filename)}.md"
-        final_md.write_text(full_md, encoding="utf-8")
-        log.info("[%s] PaddleOCR-VL 完成: %d 块, %d 字符, %d 张图片",
-                 file_id, num_chunks, len(full_md), img_count)
-        await queue.put({"type": "file_done", "file_id": file_id,
-                         "filename": filename, "pages": num_chunks,
-                         "chars": len(full_md), "markdown": full_md,
-                         "has_images": img_count > 0})
-    except Exception as e:
-        log.exception("[%s] PaddleOCR-VL 失败: %s", file_id, filename)
-        await queue.put({"type": "file_error", "file_id": file_id,
-                         "filename": filename, "error": str(e)})
-
-
-# ---------------------------------------------------------------------------
-# Web 界面（支持 SSE 实时进度）
-# ---------------------------------------------------------------------------
-
 UPLOAD_PAGE_HTML = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -946,35 +394,6 @@ UPLOAD_PAGE_HTML = """
     font-size:12px; font-weight:700; color:var(--ink); letter-spacing:.08em; }
   .section-label::before{ content:""; width:7px; height:7px; background:var(--red); flex:none; }
 
-  /* ── 模式选择 ── */
-  .mode-grid{ display:grid; grid-template-columns:1fr 1fr; gap:1px;
-    background:var(--line); border:1px solid var(--line); margin-bottom:34px; }
-  .mode-card{ background:#fff; padding:22px 24px; cursor:pointer;
-    transition:background .18s; position:relative; }
-  .mode-card:hover{ background:var(--panel); }
-  .mode-card.selected{ background:var(--red-tint); }
-  .mode-card.selected::before{ content:""; position:absolute; top:0; left:0; bottom:0;
-    width:3px; background:var(--red); }
-  .mode-card.selected::after{ content:""; position:absolute; top:16px; right:16px;
-    width:8px; height:8px; background:var(--red); }
-  .mode-card input[type=radio]{ position:absolute; opacity:0; pointer-events:none; }
-  .mode-icon{ display:none; }
-  .mode-title{ font-size:15px; font-weight:700; color:var(--ink); margin-bottom:9px;
-    letter-spacing:.01em; }
-  .mode-badge{ display:inline-block; font-size:10px; letter-spacing:.14em;
-    text-transform:uppercase; color:var(--muted); margin-bottom:10px; font-weight:500; }
-  .mode-card.selected .mode-badge{ color:var(--red); }
-  .mode-desc{ font-size:12px; color:var(--muted); line-height:1.75; }
-  /* 卡内子选项（如 PaddleOCR-VL 的 MLX 加速开关）*/
-  .mode-opt{ display:flex; align-items:center; gap:9px; margin-top:14px; padding-top:13px;
-    border-top:1px solid var(--line-soft); font-size:12px; color:var(--gray); cursor:pointer; }
-  .mode-opt input[type=checkbox]{ appearance:none; -webkit-appearance:none; width:15px; height:15px;
-    border:1.5px solid var(--line); background:#fff; cursor:pointer; position:relative; flex:none; transition:all .15s; }
-  .mode-opt input[type=checkbox]:checked{ background:var(--red); border-color:var(--red); }
-  .mode-opt input[type=checkbox]:checked::after{ content:""; position:absolute; left:4px; top:1px;
-    width:4px; height:8px; border:solid #fff; border-width:0 2px 2px 0; transform:rotate(45deg); }
-  .mode-opt span{ cursor:pointer; }
-
   /* ── 选项行（复选框）── */
   .lang-row{ display:flex; align-items:center; gap:10px; width:100%;
     margin-bottom:12px; padding:15px 18px; background:#fff; border:1px solid var(--line); }
@@ -1016,9 +435,6 @@ UPLOAD_PAGE_HTML = """
     margin-bottom:12px; overflow:hidden; }
   .progress-bar{ height:100%; background:var(--red); transition:width .3s; width:0%; }
   .progress-bar.done{ background:var(--red); }
-  .progress-bar.indeterminate{ width:40% !important;
-    animation:indeterminate 1.4s ease-in-out infinite; }
-  @keyframes indeterminate{ 0%{ margin-left:-40%; } 100%{ margin-left:100%; } }
 
   .result-row{ display:flex; gap:8px; margin-top:6px; flex-wrap:wrap; }
   .btn{ padding:8px 16px; border:1px solid transparent; cursor:pointer; font-size:12px;
@@ -1028,8 +444,6 @@ UPLOAD_PAGE_HTML = """
   .btn-copy.copied{ background:var(--gray); }
   .btn-download{ background:#fff; color:var(--gray); border-color:var(--line); }
   .btn-download:hover{ border-color:var(--gray); color:var(--ink); }
-  .btn-zip{ background:#fff; color:var(--red); border-color:var(--red); }
-  .btn-zip:hover{ background:var(--red-tint); }
   .file-info{ font-size:11px; color:var(--muted); margin-top:8px; letter-spacing:.02em; }
 
   .spinner{ display:inline-block; width:11px; height:11px; border:2px solid var(--red);
@@ -1059,45 +473,8 @@ UPLOAD_PAGE_HTML = """
     <p class="subtitle">选择解析模式，拖入 PDF，实时输出结构化 Markdown，支持多文件并行处理。</p>
   </div>
 
-  <div class="section-label">解析模式</div>
-  <!-- 模式选择 -->
-  <div class="mode-grid" id="modeGrid">
-    <label class="mode-card selected" onclick="selectMode('vlm')">
-      <input type="radio" name="mode" value="vlm" checked>
-      <div class="mode-icon">🌐</div>
-      <div class="mode-title">Kimi 2.6 VLM</div>
-      <span class="mode-badge">远程 API</span>
-      <div class="mode-desc">手写 / 复杂版式 / 图文混排最佳<br>逐页实时进度</div>
-    </label>
-    <label class="mode-card" onclick="selectMode('mineru_txt')">
-      <input type="radio" name="mode" value="mineru_txt">
-      <div class="mode-icon">📄</div>
-      <div class="mode-title">MinerU 文字版</div>
-      <span class="mode-badge">本地 · 数字 PDF</span>
-      <div class="mode-desc">版式结构完美还原<br>无需 API · 整体处理</div>
-    </label>
-    <label class="mode-card" onclick="selectMode('mineru_ocr')">
-      <input type="radio" name="mode" value="mineru_ocr">
-      <div class="mode-icon">🖥️</div>
-      <div class="mode-title">MinerU 扫描版</div>
-      <span class="mode-badge">本地 · 扫描 PDF</span>
-      <div class="mode-desc">版式保留好 · ch_lite 模型<br>整体处理 · 适合印刷体</div>
-    </label>
-    <label class="mode-card" onclick="selectMode('paddleocr')">
-      <input type="radio" name="mode" value="paddleocr">
-      <div class="mode-icon">🧠</div>
-      <div class="mode-title">PaddleOCR-VL</div>
-      <span class="mode-badge">本地 · VLM 文档解析</span>
-      <div class="mode-desc">0.9B VLM · 表格/公式/图表<br>109 语言 · 结构化 Markdown</div>
-      <span class="mode-opt">
-        <input type="checkbox" id="paddleMlx" checked>
-        <span onclick="var c=document.getElementById('paddleMlx'); c.checked=!c.checked;">MLX 加速 · Apple Silicon 约 20×</span>
-      </span>
-    </label>
-  </div>
-
   <div class="section-label">处理选项</div>
-  <!-- 水印过滤选项（对全部四种解析模式均生效） -->
+  <!-- 水印过滤选项 -->
   <div class="lang-row">
     <label>
       <input type="checkbox" id="stripWatermark" checked>
@@ -1133,16 +510,6 @@ const fileInput = document.getElementById('fileInput');
 const fileCards = document.getElementById('fileCards');
 const fileState = {};
 
-let selectedMode = 'vlm';
-
-function selectMode(mode) {
-  selectedMode = mode;
-  document.querySelectorAll('.mode-card').forEach(c => c.classList.remove('selected'));
-  document.querySelectorAll('.mode-card input[type=radio]').forEach(r => {
-    if (r.value === mode) { r.checked = true; r.closest('.mode-card').classList.add('selected'); }
-  });
-}
-
 dropZone.addEventListener('click', () => fileInput.click());
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
@@ -1173,7 +540,6 @@ function createCard(fileId, filename) {
     <div class="result-row" id="btns-${fileId}" style="display:none">
       <button class="btn btn-copy" onclick="copyFile('${fileId}')">复制 Markdown</button>
       <button class="btn btn-download" onclick="downloadFile('${fileId}')">下载 .md</button>
-      <button class="btn btn-zip" id="zip-${fileId}" onclick="downloadZip('${fileId}')" style="display:none">下载 ZIP (含图片)</button>
     </div>
     <div class="file-info" id="info-${fileId}"></div>
   `;
@@ -1183,11 +549,8 @@ function createCard(fileId, filename) {
 async function uploadFiles(files) {
   const formData = new FormData();
   for (const f of files) formData.append('files', f);
-  formData.append('mode', selectedMode);
   const strip = document.getElementById('stripWatermark');
   formData.append('strip_watermark', (strip && strip.checked) ? '1' : '0');
-  const mlx = document.getElementById('paddleMlx');
-  formData.append('paddle_mlx', (mlx && mlx.checked) ? '1' : '0');
   const pm = document.getElementById('pageMarkers');
   formData.append('page_markers', (pm && pm.checked) ? '1' : '0');
 
@@ -1239,30 +602,16 @@ function handleEvent(evt, tmpCards, startTime) {
 
   if (evt.type === 'file_start') {
     st.pages = evt.total;
-    if (evt.total === 0) {
-      // 不定进度：MinerU 整体处理
-      st.indeterminate = true;
-      document.getElementById('bar-' + fid).classList.add('indeterminate');
-      setStatus(fid, '<span class="spinner"></span>本地处理中（请稍候）...', false);
-    } else {
-      setStatus(fid, `<span class="spinner"></span>识别中 (0/${evt.total})`, false);
-    }
+    setStatus(fid, `<span class="spinner"></span>识别中 (0/${evt.total})`, false);
   } else if (evt.type === 'page_done') {
     const { page, text, done, total } = evt;
     st.pageTexts[page] = text;
     const pct = Math.round((done / total) * 100);
     document.getElementById('bar-' + fid).style.width = pct + '%';
     setStatus(fid, `<span class="spinner"></span>识别中 (${done}/${total})`, false);
-  } else if (evt.type === 'file_progress') {
-    // MinerU 实时进度：把每行输出展示为状态文字
-    const safe = String(evt.message || '').replace(/[<>&"]/g, c => ({
-      '<':'&lt;', '>':'&gt;', '&':'&amp;', '"':'&quot;'
-    }[c]));
-    setStatus(fid, '<span class="spinner"></span>' + safe, false);
   } else if (evt.type === 'file_done') {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     const bar = document.getElementById('bar-' + fid);
-    bar.classList.remove('indeterminate');
     bar.style.width = '100%';
     bar.classList.add('done');
     setStatus(fid, '完成', true);
@@ -1270,23 +619,7 @@ function handleEvent(evt, tmpCards, startTime) {
     document.getElementById('info-' + fid).textContent =
       `${pagesStr}${evt.chars} 字符 | 耗时 ${elapsed} 秒`;
     document.getElementById('btns-' + fid).style.display = 'flex';
-
-    // 优先使用服务端发来的 markdown（MinerU 模式），否则从 pageTexts 重建
-    if (evt.markdown) {
-      st.md = evt.markdown;
-    } else {
-      let md = '';
-      for (let i = 1; i <= evt.pages; i++) {
-        const t = st.pageTexts[i] || '';
-        md += (md ? '\\n\\n---\\n\\n' : '') + `<!-- 第 ${i} 页 -->\\n\\n${t}`;
-      }
-      st.md = md;
-    }
-    // 含图片时显示 ZIP 下载按钮（MinerU / PaddleOCR-VL 才会有）
-    if (evt.has_images) {
-      const zb = document.getElementById('zip-' + fid);
-      if (zb) zb.style.display = '';
-    }
+    st.md = evt.markdown || '';
   } else if (evt.type === 'file_error') {
     const bar = document.getElementById('bar-' + fid);
     bar.classList.remove('indeterminate');
@@ -1321,10 +654,6 @@ function downloadFile(fid) {
   a.click();
 }
 
-function downloadZip(fid) {
-  // 直接跳到下载端点，浏览器自动按 Content-Disposition 处理文件名
-  window.location.href = '/download_zip/' + encodeURIComponent(fid);
-}
 </script>
 </body>
 </html>
@@ -2504,60 +1833,12 @@ async def parse_pdf_stream(
                 done_count += 1
             elif t == "file_error":
                 error_count += 1
-            # VLM 和 PaddleOCR 模式：page_done 已携带文本，file_done 的 markdown 可省略
-            # MinerU 模式：无 page_done，必须发送 file_done.markdown
-            # 策略：始终发送 markdown（前端优先用 evt.markdown，否则重建）
             yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
 
         await asyncio.gather(*tasks)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(_generate(), media_type="text/event-stream")
-
-
-@app.get("/download_zip/{file_id}")
-async def download_zip(file_id: str):
-    """下载 output/<file_id>/ 目录打包成的 ZIP（含 .md 与 images/）。"""
-    # file_id 仅允许 uuid hex / 安全字符，防止路径穿越
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", file_id):
-        return JSONResponse({"error": "invalid file_id"}, status_code=400)
-
-    src = OUTPUT_DIR / file_id
-    # 二次校验：解析后必须仍在 OUTPUT_DIR 下
-    try:
-        src_resolved = src.resolve()
-        if OUTPUT_DIR.resolve() not in src_resolved.parents and src_resolved != OUTPUT_DIR.resolve():
-            return JSONResponse({"error": "invalid path"}, status_code=400)
-    except OSError:
-        return JSONResponse({"error": "invalid path"}, status_code=400)
-    if not src.exists() or not src.is_dir():
-        return JSONResponse({"error": "not found"}, status_code=404)
-
-    buf = io.BytesIO()
-    file_count = 0
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in sorted(src.rglob("*")):
-            if not p.is_file():
-                continue
-            # 跳过遗留临时目录
-            rel = p.relative_to(src)
-            if rel.parts and rel.parts[0].startswith("_"):
-                continue
-            zf.write(p, rel)
-            file_count += 1
-    if file_count == 0:
-        return JSONResponse({"error": "empty"}, status_code=404)
-    buf.seek(0)
-
-    md_files = sorted(src.glob("*.md"))
-    base_name = md_files[0].stem if md_files else file_id
-    zip_name = f"{base_name}.zip"
-    encoded = quote(zip_name)
-    return StreamingResponse(
-        buf,
-        media_type="application/zip",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
-    )
 
 
 @app.get("/health")
