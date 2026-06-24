@@ -2452,16 +2452,12 @@ async def translate_stream(
 @app.post("/parse_pdf_stream")
 async def parse_pdf_stream(
     files: list[UploadFile] = File(...),
-    mode: str = Form(default="vlm"),
-    ocr_lang: str = Form(default="ch"),
     strip_watermark: str = Form(default="1"),
-    paddle_mlx: str = Form(default="1"),
     page_markers: str = Form(default="1"),
 ):
     """
     SSE 流式解析，支持同时上传多个 PDF。
-    mode: vlm | mineru_txt | mineru_ocr | paddleocr
-    paddleocr 模式使用 PaddleOCR-VL（VLM 整文档解析，不定进度）。
+    解析后端：Kimi 2.6 VLM（逐页实时进度）。
     多文件并行处理，前端按 file_id 区分。
     """
     # 过滤非 PDF
@@ -2470,31 +2466,22 @@ async def parse_pdf_stream(
         return JSONResponse({"success": False, "error": "请上传 PDF 文件"})
 
     # 预读所有文件内容（UploadFile 不能在 async generator 外部访问）
-    # file_id 用 uuid 以避免不同请求落到同一 output 目录互相覆盖
     file_data = []
     for f in valid:
         data = await f.read()
         file_data.append((uuid.uuid4().hex, f.filename, data))
 
     strip_wm = strip_watermark == "1"
-    want_mlx = paddle_mlx == "1"
     pm = page_markers == "1"
-    log.info("PDF 解析请求: %d 个文件, mode=%s, ocr_lang=%s, strip_watermark=%s, paddle_mlx=%s, page_markers=%s",
-             len(file_data), mode, ocr_lang, strip_wm, want_mlx, pm)
-
-    # 路由到对应处理函数
-    task_map = {
-        "vlm":        lambda d, fn, fid, q: parse_pdf_streaming(d, fn, fid, q, strip_wm, pm),
-        "mineru_txt": lambda d, fn, fid, q: parse_pdf_mineru(d, fn, fid, q, "txt", strip_wm, pm),
-        "mineru_ocr": lambda d, fn, fid, q: parse_pdf_mineru(d, fn, fid, q, "ocr", strip_wm, pm),
-        "paddleocr":  lambda d, fn, fid, q: parse_pdf_paddleocr(d, fn, fid, q, ocr_lang, strip_wm, want_mlx, pm),
-    }
-    task_fn = task_map.get(mode, task_map["vlm"])
+    log.info("PDF 解析请求: %d 个文件, strip_watermark=%s, page_markers=%s",
+             len(file_data), strip_wm, pm)
 
     async def _generate():
         queue: asyncio.Queue = asyncio.Queue()
         tasks = [
-            asyncio.create_task(task_fn(data, filename, file_id, queue))
+            asyncio.create_task(
+                parse_pdf_streaming(data, filename, file_id, queue, strip_wm, pm)
+            )
             for file_id, filename, data in file_data
         ]
 
