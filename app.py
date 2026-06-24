@@ -334,6 +334,29 @@ async def parse_pdf_streaming(
                      "chars": len(full_md), "markdown": full_md})
 
 
+async def _parse_pdf_safe(
+    pdf_bytes: bytes,
+    filename: str,
+    file_id: str,
+    queue: asyncio.Queue,
+    strip_watermark: bool,
+    page_markers: bool,
+) -> None:
+    """parse_pdf_streaming 的兜底包装：任何异常都转成一条 file_error 事件。
+
+    没有它的话，损坏 PDF（pdf_to_images 抛错）等情况会让 task 直接死亡、
+    既不发 file_done 也不发 file_error，使 _generate 的事件循环永久挂起。
+    """
+    try:
+        await parse_pdf_streaming(
+            pdf_bytes, filename, file_id, queue, strip_watermark, page_markers
+        )
+    except Exception as e:
+        log.exception("[%s] 解析失败: %s", file_id, e)
+        await queue.put({"type": "file_error", "file_id": file_id,
+                         "filename": filename, "error": str(e) or e.__class__.__name__})
+
+
 UPLOAD_PAGE_HTML = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -1808,7 +1831,7 @@ async def parse_pdf_stream(
         queue: asyncio.Queue = asyncio.Queue()
         tasks = [
             asyncio.create_task(
-                parse_pdf_streaming(data, filename, file_id, queue, strip_wm, pm)
+                _parse_pdf_safe(data, filename, file_id, queue, strip_wm, pm)
             )
             for file_id, filename, data in file_data
         ]
