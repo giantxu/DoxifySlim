@@ -21,3 +21,7 @@ Thumbs.db
 
 # Playwright scratch
 .playwright-mcp/
+
+# 测试/工具缓存
+.pytest_cache/
+.claude/

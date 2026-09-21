@@ -1,22 +1,39 @@
 # DoxifySlim
 
-基于 **Kimi 2.6 VLM** 的精简版 PDF→Markdown 解析工具 + Markdown 翻译工具（JT&N 金诚同达内部使用）。
+基于 **Kimi VLM** 的 PDF→Markdown 解析 + Markdown / Office 文档翻译工具（JT&N 金诚同达内部使用）。
+Doxify 的精简版：去掉了 MinerU / PaddleOCR-VL 等本地模型，只保留远程 VLM 路径，**无模型下载、无 GPU 依赖，Windows / macOS / Linux 通用**。
 
 ```
-PDF → Kimi 2.6 VLM（逐页识别）→ Markdown
-                                   │
-                                   └── Markdown → 分块并行翻译 → 译文 Markdown
+PDF ──→ Kimi VLM 逐页识别 ──→ Markdown（图表原样保留、脚注归一、跨页段落接回）
+                                  │
+Markdown ──→ 分块并行翻译 ──→ 译文 Markdown
+                                  │
+Word (.docx) ──→ 原位翻译 ──→ 译文 .docx（格式、修订、批注、字体全保留）
 ```
 
 ## 界面预览
 
-**PDF 解析页**（`/`）
+| PDF 解析（`/`） | Markdown 翻译（`/translate`） | Office 文档翻译（`/office`） |
+|---|---|---|
+| ![PDF 解析页](docs/images/parse.png) | ![Markdown 翻译页](docs/images/translate.png) | ![Office 文档翻译页](docs/images/office.png) |
 
-![PDF 解析页](docs/images/parse.png)
+---
 
-**Markdown 翻译页**（`/translate`）
+## 目录
 
-![Markdown 翻译页](docs/images/translate.png)
+- [功能](#功能)
+- [安装](#安装)
+  - [Windows](#windows)
+  - [macOS / Linux](#macos--linux)
+- [配置 `.env`](#配置-env)
+- [启动与使用](#启动与使用)
+  - [PDF 解析](#1-pdf-解析)
+  - [Markdown 翻译](#2-markdown-翻译)
+  - [Office 文档翻译](#3-office-文档翻译)
+- [断线续跑与作业恢复](#断线续跑与作业恢复)
+- [常见问题](#常见问题)
+- [目录结构](#目录结构)
+- [开发与测试](#开发与测试)
 
 ---
 
@@ -24,200 +41,238 @@ PDF → Kimi 2.6 VLM（逐页识别）→ Markdown
 
 ### ① PDF 解析
 
-- **引擎**：Kimi 2.6 VLM（远程 API），将每页 PDF 转为图片后逐页调用 VLM 识别
-- **实时进度**：SSE 流式推送，浏览器实时显示每页完成情况
-- **两个处理选项**（勾选即生效）：
-  - **去除页眉/页脚水印**：自动剥离 EAPA 风格的 Barcode 头、Filed By 脚水印行
-  - **插入分页标识**：每页 Markdown 之间插入 `--- [第 N 页] ---` 分隔符
-- **结果获取**：页面下方提供"复制 Markdown"和"下载 .md"两个按钮，无 ZIP 打包
-- **多文件并行**：同时拖入多个 PDF，各文件独立并行处理
+- **引擎**：Kimi VLM（远程 API），PDF 每页转图片后逐页识别，多页并发
+- **图表保留**：数字 PDF 里的位图和矢量图表自动抽出到 `images/`，Markdown 中原位引用；表格框线不会被误当成图片
+- **后处理流水线**（对识别结果自动执行）：
+  - 页眉页脚水印剥离（`Barcode:… / Filed By:…` 风格，含被模型加了包装的形态）
+  - 脚注归一化：`^12^`、`¹²`、`<sup>12</sup>`、裸数字等畸形标记统一为 `[^12]`，尾注列表转为 `[^12]:` 定义
+  - 跨页段落接回、段内硬换行接回、跨页表格接合
+  - 页码兜底剥离、误标为引用块的列表还原、字面 `•` 转 Markdown 列表
+- **思考模式防护**：按模型档案下发关闭思考的参数，并对响应做二次剥离，推理过程不会混进产物
+- **页级缓存**：同一 PDF 重复解析零 API 调用（缓存键 = 文件内容 + DPI + 模型名）
+- **多文件并行**，逐页实时进度，含图片时提供 ZIP 打包下载
 
 ### ② Markdown 翻译
 
-- 粘贴文本或上传多个 `.md` 文件
-- 分块并行翻译，流式 token-by-token 输出
-- 自动检测残留英文并一次性修正（`_detect_residual_english` + `_fix_residual_english`）
+- 粘贴文本或上传多个 `.md` / `.txt` 文件
+- 分块并行、流式逐 token 输出；首段缓冲防止推理过程当译文流出
+- 自动检测残留英文并一次性修正
 - 保留 Markdown 格式、代码块、表格、链接
-- 支持选择目标语言（默认"中文"）
 
----
+### ③ Office 文档翻译（目前支持 .docx）
 
-## 系统要求
+- **格式、修订（track changes）、批注、页眉页脚、脚注尾注全部原样保留**——只改文本节点，文档结构一个节点不动
+- 修订中的删除文本同样翻译，批注作者与时间戳不动
+- **译文字体自动补齐**：英译中给汉字补东亚字体（宋体/等线/微软雅黑可选），中译英换拉丁字体，泰文走复杂文种轨；内置 8 种目标语言的常用字体，自定义语言由 LLM 即时推荐
+- 未译成的段落会计数提示（"N 段未译，保留原文"），不静默
 
-| 要求 | 说明 |
-|---|---|
-| Python | **3.10 或更高**（3.11 / 3.12 均可） |
-| 操作系统 | macOS 或 Windows |
-| 网络 | 需可访问 Kimi API（或其他 OpenAI 兼容端点） |
-| 模型下载 | **无需下载任何本地模型** |
+### 通用
+
+- **作业在后台运行**：关掉浏览器标签、刷新页面、网络抖动都不会丢作业，重新打开页面自动接回进度
+- 无认证，设计为本机 `127.0.0.1` 使用
 
 ---
 
 ## 安装
 
-### macOS
-
-```bash
-bash install.sh
-```
+**前置条件**：Python 3.10 或更高版本。除此之外不需要任何东西——没有模型下载，没有 GPU。
 
 ### Windows
 
-双击 `install.bat`，或在命令提示符中运行：
+1. **安装 Python**（已有 3.10+ 可跳过）
+   - 从 [python.org](https://www.python.org/downloads/windows/) 或 [华为云镜像](https://mirrors.huaweicloud.com/python/) 下载安装包
+   - 安装时**务必勾选 "Add python.exe to PATH"**
+   - 装好后重新打开 PowerShell / 命令提示符，输入 `python --version` 确认
 
-```cmd
-install.bat
-```
+   > 如果 `python` 命令弹出微软商店，说明 PATH 里是商店占位程序。用 `py -3 --version` 试试；安装脚本会自动检测两种情况。
 
-脚本会自动：
+2. **获取代码**
 
-1. 检测 Python 3.10+（不满足时提示华为云下载地址）
-2. 创建虚拟环境 `.venv`
-3. 从国内镜像安装依赖（**阿里云 → 清华 → 中科大** 自动回退，无需手动配置）
-4. 初始化 `.env`（首次运行时从 `.env.example` 复制）
+   ```powershell
+   git clone https://github.com/giantxu/DoxifySlim.git
+   cd DoxifySlim
+   ```
+   没有 git 的话，在 GitHub 页面点 **Code → Download ZIP**，解压后进入目录。
 
-> 如果所有镜像均失败，可手动安装：
-> ```bash
-> source .venv/bin/activate   # macOS
-> # .venv\Scripts\activate.bat  # Windows
-> pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
-> ```
+3. **运行安装脚本**：双击 `install.bat`，或在该目录下的终端里执行
 
----
+   ```powershell
+   .\install.bat
+   ```
+   脚本会创建 `.venv` 虚拟环境、从国内镜像安装依赖（阿里云 → 清华 → 中科大自动回退），并生成 `.env`。
 
-## 配置
+4. **填写 `.env`**（见下节），用记事本打开即可。
 
-编辑项目根目录的 `.env` 文件（安装后自动生成）：
+5. **启动**：双击 `start.bat`。浏览器会自动打开 `http://127.0.0.1:4000`。
 
-```dotenv
-TARGET_API_URL=https://your-api-endpoint.com/v1/chat/completions
-TARGET_API_KEY=your_api_key_here
-ACTUAL_MODEL_NAME=kimi26
-```
-
-**必填项**：`TARGET_API_URL`、`TARGET_API_KEY`、`ACTUAL_MODEL_NAME`
-
-**可选项**（已有合理默认值，一般无需修改）：
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `GATEWAY_PORT` | `4000` | 服务监听端口 |
-| `LLM_TIMEOUT` | `300` | LLM 请求总超时（秒） |
-| `PAGE_TIMEOUT` | `120` | 单页 VLM 识别超时（秒） |
-| `PDF_DPI` | `200` | PDF→图片分辨率（越高越清晰但越慢） |
-| `CONCURRENCY` | `5` | 单文件内并发 Worker 数 |
-| `CONCURRENCY_THRESHOLD` | `10` | 启用并发的最小页数 |
-| `MAX_CONCURRENT_REQUESTS` | `8` | 全局最大同时 API 请求数 |
-| `TRANSLATE_CHUNK_CHARS` | `3000` | 每块最大翻译字符数 |
-| `TRANSLATE_TARGET_LANG` | `中文` | 默认翻译目标语言 |
-
----
-
-## 启动
-
-### macOS
+### macOS / Linux
 
 ```bash
-bash start.sh
+git clone https://github.com/giantxu/DoxifySlim.git
+cd DoxifySlim
+bash install.sh          # 创建 .venv、安装依赖、生成 .env
+# 编辑 .env 填写 API 信息
+bash start.sh            # 启动服务
 ```
 
-### Windows
+### 手动安装（任意平台）
 
-双击 `start.bat`，或在命令提示符中运行 `start.bat`。
-
-### 直接启动（任意平台，已激活 venv）
+不想用脚本的话：
 
 ```bash
-source .venv/bin/activate   # macOS
+python -m venv .venv
+# Windows:  .venv\Scripts\activate
+# macOS/Linux:  source .venv/bin/activate
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+cp .env.example .env     # Windows 用 copy
 python app.py
 ```
 
-浏览器访问：
+---
 
-| 功能 | 地址 |
-|---|---|
-| PDF 解析 | `http://127.0.0.1:4000` |
-| Markdown 翻译 | `http://127.0.0.1:4000/translate` |
-| 健康检查 | `http://127.0.0.1:4000/health` |
+## 配置 `.env`
+
+安装脚本会从 `.env.example` 复制一份 `.env`。**必须填写的只有三项**：
+
+```ini
+TARGET_API_URL=http://你的网关地址/v1/chat/completions   # OpenAI 兼容端点
+TARGET_API_KEY=你的密钥
+ACTUAL_MODEL_NAME=kimi-2.6                                 # 网关上的模型名
+```
+
+**第四项强烈建议确认**——它决定"关闭思考模式"用哪套参数，选错的后果是模型的推理过程整段写进产物：
+
+```ini
+LLM_PROFILE=glm53flash    # 网关背后是 GLM 系 → glm53flash；Kimi / Qwen 系 → kimi26
+```
+
+其余参数都有合理默认值，`.env.example` 里每一项都有注释说明。常用的几个：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `GATEWAY_PORT` | 4000 | 服务端口 |
+| `PDF_DPI` | 200 | PDF 转图片分辨率。**改动会让页缓存全部失效** |
+| `CONCURRENCY` | 5 | 单文件内并发页数 |
+| `MAX_CONCURRENT_REQUESTS` | 8 | 全局同时 API 请求上限 |
+| `TRANSLATE_CONCURRENCY` | 3 | 同时在途的翻译流数 |
+| `TRANSLATE_TARGET_LANG` | 中文 | 默认目标语言 |
+| `HEARTBEAT_SEC` | 60 | 进度心跳日志间隔，`<=0` 关闭 |
 
 ---
 
-## 使用说明
+## 启动与使用
 
-### PDF 解析页（`/`）
+| 平台 | 启动 | 停止 |
+|---|---|---|
+| Windows | 双击 `start.bat` | 在黑窗口按 `Ctrl+C`，或直接关窗口 |
+| macOS / Linux | `bash start.sh` | `Ctrl+C` |
 
-1. 先按需勾选处理选项（拖入文件后会立即开始处理，所以请先设置）：
-   - ☑ **去除页眉/页脚水印**：剔除 EAPA 文件中的 Barcode / Filed By 水印行
-   - ☑ **插入分页标识**：每页之间插入分隔符，便于对照原件
-2. 将一个或多个 PDF 拖入上传区（或点击选择）——选好后**自动开始解析**，无需额外按钮
-3. 等待进度条逐页更新（多文件并行处理）
-4. 完成后点击"**复制 Markdown**"或"**下载 .md**"获取结果
+启动后三个页面：
 
-### Markdown 翻译页（`/translate`）
+| 页面 | 地址 |
+|---|---|
+| PDF 解析 | `http://127.0.0.1:4000/` |
+| Markdown 翻译 | `http://127.0.0.1:4000/translate` |
+| Office 文档翻译 | `http://127.0.0.1:4000/office` |
 
-1. 在文本框粘贴 Markdown 内容，或上传 `.md` 文件（支持多选）
-2. 选择目标语言（默认"中文"）
-3. 点击"开始翻译"，流式实时显示译文
-4. 翻译完成后复制或下载结果
+日志写在 `gateway.log`（与 `app.py` 同目录），排查问题先看它。
+
+### 1. PDF 解析
+
+1. 打开首页，按需勾选处理选项：
+   - **去除页眉/页脚水印**：剥离 `Barcode:… / Filed By:…` 这类行（默认开）
+   - **插入分页标识**：每页之间插 `--- [第 N 页] ---`（默认开）。**取消勾选**时程序才会执行跨页段落接回、跨页表格接合——想要连贯的正文就把它关掉
+   - **规范化脚注/尾注**：畸形脚注标记统一为 Markdown 语法（默认开）
+2. 把 PDF 拖进上传区（可多选）——**拖入即开始**，没有"开始"按钮
+3. 每个文件一张卡片，实时显示 `已完成/总页数`
+4. 完成后：**复制 Markdown**、**下载 .md**；如果文档含图表，还会出现 **下载 ZIP（含图片）**——`.md` 里的图片引用是相对路径 `images/…`，解压后放在一起即可正常显示
+
+> 同一份 PDF 再次解析会命中页缓存，几乎瞬间完成、不消耗 API。
+
+### 2. Markdown 翻译
+
+1. 打开 `/translate`，选目标语言（中文 / English / 日本語 / 自定义）
+2. 两种输入：
+   - **粘贴文本**：左边贴原文，右边实时出译文
+   - **上传文件**：拖入多个 `.md` / `.txt`，每个文件一张卡片
+3. 点 **开始翻译**。分块并行，逐 token 流式显示
+4. 完成后复制或下载 `.md`；文件名自动带语种后缀（如 `报告_EN2CN.md`）
+
+### 3. Office 文档翻译
+
+1. 打开 `/office`，选目标语言。内置：中文、English、日本語、葡萄牙语、西班牙语、越南语、泰语、马来西亚语，或选**自定义**输入任意语言名
+2. **译文字体**下拉会随语言变化，列出该语言 Word 文书最常用的字体；自定义语言输入后约 1 秒，程序会向 LLM 询问并刷新字体列表。不想动字体选 **不调整**
+3. 拖入 `.docx`（可多选），点 **开始翻译**
+4. 完成后点 **下载 .docx**。产物保留原文档的全部格式、修订、批注；如有段落未能译成，状态会显示"完成（N 段未译，保留原文）"
+
+> 修订（track changes）中被删除的文字也会翻译，修订标记原样保留——读者能看懂完整的修改历史。
+
+---
+
+## 断线续跑与作业恢复
+
+所有解析和翻译都是**后台作业**，与浏览器连接无关：
+
+- 关掉标签页再打开、刷新、电脑休眠后唤醒、网络抖动——页面会自动接回正在进行的作业，进度从上次位置继续显示
+- 想中止就点卡片上的 **取消**
+- 服务重启后作业会丢（在内存里），但 PDF 解析的**每一页结果都已经落盘**：重新上传同一份 PDF，已完成的页直接从缓存读取，只补跑没做完的页
 
 ---
 
 ## 常见问题
 
-**Q：Python 未安装或版本过低？**  
-A：请从华为云镜像下载 Python 3.12 安装包：  
-`https://mirrors.huaweicloud.com/python/`
+**Q: 产物里出现了模型的"思考过程"（一大段"用户希望我…让我来…"）？**
+`LLM_PROFILE` 与网关背后的模型不匹配。GLM 系填 `glm53flash`，Kimi / Qwen 系填 `kimi26`，改完重启。程序还有一道事后剥离，但选对档案才是根治。
 
-**Q：pip 安装慢或报错？**  
-A：`install.sh` / `install.bat` 已内置阿里云/清华/中科大多镜像自动回退。若仍失败，手动指定：  
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
-```
+**Q: Windows 上中文显示乱码 / 报 `UnicodeDecodeError`？**
+请用 `start.bat` 启动（它设置了 UTF-8 环境）。手动启动的话先执行 `set PYTHONUTF8=1`。
 
-**Q：端口 4000 已被占用？**  
-A：编辑 `.env`，将 `GATEWAY_PORT` 改为其他端口（如 `4001`），重启服务即生效。
+**Q: `install.bat` 说找不到 Python，但我装了？**
+安装时没勾 "Add python.exe to PATH"。重新运行 Python 安装包，选 Modify，勾上 PATH；或者用 `py -3` 启动器（脚本会自动尝试）。
 
-**Q：API 报错（401 / 403 / 连接超时）？**  
-A：检查 `.env` 中的 `TARGET_API_URL`、`TARGET_API_KEY`、`ACTUAL_MODEL_NAME` 是否正确，以及网络是否可访问该端点。
+**Q: pip 安装依赖失败？**
+脚本会依次尝试三个国内镜像。都失败多半是代理/防火墙问题——关掉代理软件再试，或手动指定镜像：`pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple`。
 
-**Q：解析结果有页眉/页脚杂项行？**  
-A：在解析页勾选"去除页眉/页脚水印"选项后重新解析。
+**Q: 解析结果里表格是 HTML 而不是 Markdown？**
+含合并单元格的表格 Markdown 语法表达不了，程序会保留 HTML（在 Obsidian、Typora 等渲染器里能正常显示）。不含合并单元格的表会自动转成 Markdown 管道表。
+
+**Q: 改了 `PDF_DPI` 之后为什么之前的文档要重新识别？**
+DPI 是页缓存键的一部分——分辨率变了识别结果就可能不同，缓存必须失效。
+
+**Q: 能多人共用吗？**
+可以把 `app.py` 里的 `host="127.0.0.1"` 改成 `0.0.0.0`，局域网内通过 `http://<本机IP>:4000` 访问。但程序**没有认证**，不要暴露到公网。
 
 ---
 
-## 文件结构
+## 目录结构
 
 ```
 DoxifySlim/
-├── app.py              # 全部业务逻辑（FastAPI 单文件应用）
-├── requirements.txt    # 7 个 pip 依赖（无需安装模型）
-├── .env.example        # 配置模板（install 脚本自动复制为 .env）
-├── install.sh          # macOS 安装脚本
-├── install.bat         # Windows 安装脚本
-├── start.sh            # macOS 启动脚本
-├── start.bat           # Windows 启动脚本
-├── static/             # 静态资产（品牌 logo 等）
-└── tests/              # 单元测试
+├── app.py               # 主程序（FastAPI，单文件）
+├── llm_common.py        # 模型档案与响应清洗
+├── seed_page_cache.py   # 工具：从浏览器抢救的 JSON 回填页缓存
+├── static/              # 前端静态资源（重连逻辑 job-client.js、logo）
+├── tests/               # pytest 测试
+├── docs/images/         # README 截图
+├── requirements.txt
+├── .env.example         # 配置样例（复制为 .env）
+├── install.bat / install.sh
+├── start.bat / start.sh
+├── output/              # 运行时产物（自动创建，已 gitignore）
+└── gateway.log          # 运行日志（自动创建）
 ```
 
----
+## 开发与测试
 
-## 技术说明
+```bash
+# 激活 venv 后
+python -m pytest tests/ -q
+```
 
-- 单文件 FastAPI 应用，`python app.py` 启动，无需额外构建步骤
-- PDF→图片：PyMuPDF（`fitz`），DPI 可配
-- VLM 识别：每页独立 HTTP 请求，最多 3 次自动重试，超时递增 50%
-- 翻译分块：按 `TRANSLATE_CHUNK_CHARS` 在自然段落边界切块，各块并行，结果合并后输出
-- 全局信号量 `_api_semaphore` 限制同时发出的 API 请求数，防止触发 API 速率限制
-- 日志写入 `gateway.log`（同目录）
+测试不需要网络、不需要 API 密钥（LLM 调用全部用伪造客户端），几秒跑完。`tests/conftest.py` 会把日志重定向到临时文件，不污染 `gateway.log`。
 
----
+架构说明见 `CLAUDE.md`。
 
-## 许可证
+## 许可
 
-本项目以 [MIT License](LICENSE) 开源。前端保留的 "JT&N 金诚同达" 品牌标识为商标，不在 MIT 授权范围内。
-
----
-
-*JT&N 金诚同达*
+MIT，见 `LICENSE`。
