@@ -2,7 +2,7 @@
 Doxify — PDF → Markdown 解析 + Markdown 翻译工具
 
 功能：
-1. PDF 解析：Kimi VLM 远程逐页识别（DoxifySlim 仅保留此路径），
+1. PDF 解析：远程多模态 LLM（当前为 GLM-5.3-Flash）逐页识别（DoxifySlim 仅保留此路径），
    带逐页进度，输出 Markdown + 图片 ZIP 打包下载
 2. Markdown 翻译：分块并行流式翻译，含残留英文自动检测与修正
 
@@ -920,7 +920,7 @@ async def vlm_recognize_page(
     total_pages: int,
     file_id: str = "",
 ) -> str:
-    """调用 Kimi 2.6 VLM 识别单页图片，返回 Markdown 文本。
+    """调用远程 VLM 识别单页图片，返回 Markdown 文本。
 
     file_id 只用于日志归属：多文件并行时，页码在各文件间重复，不带 file_id 的
     超时/异常告警无法判断出自哪个文件（2026-08-06 排查现场就卡在这一点上）。
@@ -2215,7 +2215,7 @@ UPLOAD_PAGE_HTML = """
     <div class="dotmatrix"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
     <div class="overline"><span class="sq"></span><em>Document Parsing · 文档解析</em></div>
     <h1>PDF <b>智能解析</b></h1>
-    <p class="subtitle">拖入 PDF，Kimi VLM 逐页识别，实时输出结构化 Markdown；图表原样保留，支持多文件并行处理。</p>
+    <p class="subtitle">拖入 PDF，GLM-5.3-Flash 逐页识别，实时输出结构化 Markdown；图表原样保留，支持多文件并行处理。</p>
   </div>
 
   <div class="section-label">处理选项</div>
@@ -3308,7 +3308,7 @@ def split_markdown_chunks(text: str, max_chars: int = 3000) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 残留英文检测 & 二次修正（针对 Kimi 偶尔保留英文形容词的行为）
+# 残留英文检测 & 二次修正（针对模型偶尔保留英文形容词的行为）
 # ---------------------------------------------------------------------------
 
 # 允许在中文译文中保留原样的英文词（小写匹配；去掉连字符/撇号后比较）
@@ -3584,7 +3584,7 @@ async def translate_chunk_stream(
         **llm_extra_body(),          # 思考开关由档案决定
     }
 
-    in_think = False   # 过滤 <think>...</think> 块（Kimi K2.6 / Qwen 思维链输出）
+    in_think = False   # 过滤 <think>...</think> 块（Kimi / Qwen / GLM 思维链输出）
     think_buf = ""
     # 模型几乎总在译文最前面多吐一个空格，界面上表现为第一行缩进一格。
     # 源块自身带缩进时（代码块/嵌套列表）不动它，见 _should_trim_leading_ws。
@@ -4353,7 +4353,7 @@ TRANSLATE_PAGE_HTML = """
   <div class="hero">
     <div class="overline"><span class="sq"></span><em>Markdown Translation · 文档翻译</em></div>
     <h1>Markdown <b>智能翻译</b></h1>
-    <p class="subtitle">粘贴文本或上传多个 Markdown 文件，Kimi 2.6 流式翻译，保留完整格式。</p>
+    <p class="subtitle">粘贴文本或上传多个 Markdown 文件，GLM-5.3-Flash 流式翻译，保留完整格式。</p>
   </div>
 
   <div class="toolbar">

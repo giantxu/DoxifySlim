@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目定位
 
-DoxifySlim 是 [Doxify](https://github.com/giantxu/Doxify) 的精简版：**只保留 Kimi VLM 远程解析路径**，去掉了 MinerU / PaddleOCR-VL / MLX 等本地模型。pip-venv 安装，**必须兼容 Windows**（用户主要在 Windows 上部署）。
+DoxifySlim 是 [Doxify](https://github.com/giantxu/Doxify) 的精简版：**只保留远程多模态 LLM 解析路径**（当前网关背后是 GLM-5.3-Flash），去掉了 MinerU / PaddleOCR-VL / MLX 等本地模型。pip-venv 安装，**必须兼容 Windows**（用户主要在 Windows 上部署）。
 
 两者共享绝大部分代码。Doxify 有新迭代时，同步方式是：以 Doxify 当前 `app.py` 为源，按 AST 删除引擎专属函数、按正则删除引擎常量与 UI 模式选择区、删孤儿函数，然后在干净 venv 里跑全套测试 + 真机冒烟。不要试图逐个 cherry-pick 提交。
 
@@ -32,7 +32,7 @@ bash start.sh    /  start.bat       # 启动，默认 http://127.0.0.1:4000
 | 变量 | 说明 |
 |---|---|
 | `TARGET_API_URL` / `TARGET_API_KEY` / `ACTUAL_MODEL_NAME` | 网关三件套 |
-| `LLM_PROFILE` | 模型档案（`kimi26` / `glm53flash`），决定关闭思考模式用哪套参数。见「模型档案与思考模式」 |
+| `LLM_PROFILE` | 模型档案（`glm53flash` 当前默认 / `kimi26`），按网关背后**真实**模型选，决定关闭思考模式用哪套参数。见「模型档案与思考模式」 |
 | `PDF_DPI` | 页缓存键的一部分，改了缓存全失效 |
 | `TRANSLATE_CONCURRENCY` | 翻译流并发（嵌套在 `MAX_CONCURRENT_REQUESTS` 内，覆盖整个流生命周期） |
 | `JOB_HISTORY_MAX` / `SUBSCRIBER_QUEUE_MAX` | 作业注册表内存边界 |

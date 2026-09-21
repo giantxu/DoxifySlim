@@ -1,10 +1,10 @@
 # DoxifySlim
 
-基于 **Kimi VLM** 的 PDF→Markdown 解析 + Markdown / Office 文档翻译工具（JT&N 金诚同达内部使用）。
+基于 **GLM-5.3-Flash**（多模态 LLM）的 PDF→Markdown 解析 + Markdown / Office 文档翻译工具（JT&N 金诚同达内部使用）。任何 OpenAI 兼容的多模态端点都能接。
 Doxify 的精简版：去掉了 MinerU / PaddleOCR-VL 等本地模型，只保留远程 VLM 路径，**无模型下载、无 GPU 依赖，Windows / macOS / Linux 通用**。
 
 ```
-PDF ──→ Kimi VLM 逐页识别 ──→ Markdown（图表原样保留、脚注归一、跨页段落接回）
+PDF ──→ GLM-5.3-Flash 逐页识别 ──→ Markdown（图表原样保留、脚注归一、跨页段落接回）
                                   │
 Markdown ──→ 分块并行翻译 ──→ 译文 Markdown
                                   │
@@ -41,7 +41,7 @@ Word (.docx) ──→ 原位翻译 ──→ 译文 .docx（格式、修订、�
 
 ### ① PDF 解析
 
-- **引擎**：Kimi VLM（远程 API），PDF 每页转图片后逐页识别，多页并发
+- **引擎**：GLM-5.3-Flash（远程 OpenAI 兼容 API），PDF 每页转图片后逐页识别，多页并发
 - **图表保留**：数字 PDF 里的位图和矢量图表自动抽出到 `images/`，Markdown 中原位引用；表格框线不会被误当成图片
 - **后处理流水线**（对识别结果自动执行）：
   - 页眉页脚水印剥离（`Barcode:… / Filed By:…` 风格，含被模型加了包装的形态）
@@ -137,14 +137,16 @@ python app.py
 ```ini
 TARGET_API_URL=http://你的网关地址/v1/chat/completions   # OpenAI 兼容端点
 TARGET_API_KEY=你的密钥
-ACTUAL_MODEL_NAME=kimi-2.6                                 # 网关上的模型名
+ACTUAL_MODEL_NAME=kimi-2.6                                 # 网关上注册的模型名（见下）
 ```
 
-**第四项强烈建议确认**——它决定"关闭思考模式"用哪套参数，选错的后果是模型的推理过程整段写进产物：
+**第四项强烈建议确认**——它按网关背后**真实**的模型选，决定"关闭思考模式"用哪套参数，选错的后果是模型的推理过程整段写进产物：
 
 ```ini
-LLM_PROFILE=glm53flash    # 网关背后是 GLM 系 → glm53flash；Kimi / Qwen 系 → kimi26
+LLM_PROFILE=glm53flash    # 当前是 GLM-5.3-Flash → glm53flash；若换回 Kimi / Qwen 系 → kimi26
 ```
+
+> **模型名 ≠ 真实模型。** `ACTUAL_MODEL_NAME` 填的是网关接受的名字。有的网关会把新模型挂在旧名字下（例如 GLM-5.3-Flash 仍以 `kimi-2.6` 对外），所以模型名照网关的填，`LLM_PROFILE` 照真实模型选。
 
 其余参数都有合理默认值，`.env.example` 里每一项都有注释说明。常用的几个：
 
@@ -222,7 +224,7 @@ LLM_PROFILE=glm53flash    # 网关背后是 GLM 系 → glm53flash；Kimi / Qwen
 ## 常见问题
 
 **Q: 产物里出现了模型的"思考过程"（一大段"用户希望我…让我来…"）？**
-`LLM_PROFILE` 与网关背后的模型不匹配。GLM 系填 `glm53flash`，Kimi / Qwen 系填 `kimi26`，改完重启。程序还有一道事后剥离，但选对档案才是根治。
+`LLM_PROFILE` 与网关背后的真实模型不匹配。GLM-5.3-Flash 填 `glm53flash`，Kimi / Qwen 系填 `kimi26`，改完重启。程序还有一道事后剥离，但选对档案才是根治。
 
 **Q: Windows 上中文显示乱码 / 报 `UnicodeDecodeError`？**
 请用 `start.bat` 启动（它设置了 UTF-8 环境）。手动启动的话先执行 `set PYTHONUTF8=1`。
