@@ -34,6 +34,7 @@ bash start.sh    /  start.bat       # 启动，默认 http://127.0.0.1:4000
 | `TARGET_API_URL` / `TARGET_API_KEY` / `ACTUAL_MODEL_NAME` | 网关三件套 |
 | `LLM_PROFILE` | 模型档案（`glm53flash` 当前默认 / `kimi26`），决定关闭思考模式用哪套参数。见「模型档案与思考模式」 |
 | `PDF_DPI` | 页缓存键的一部分，改了缓存全失效 |
+| `MAX_CONCURRENT_REQUESTS` | 全局 API 并发上限，默认 3——**事务所网关的硬限制**，调高会被拒绝 |
 | `TRANSLATE_CONCURRENCY` | 翻译流并发（嵌套在 `MAX_CONCURRENT_REQUESTS` 内，覆盖整个流生命周期） |
 | `JOB_HISTORY_MAX` / `SUBSCRIBER_QUEUE_MAX` | 作业注册表内存边界 |
 | `DOXIFY_LOG_FILE` | 日志路径覆写。`tests/conftest.py` 设它，否则测试会污染生产 `gateway.log` |

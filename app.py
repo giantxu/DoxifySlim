@@ -67,11 +67,11 @@ LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "300"))
 PAGE_TIMEOUT = int(os.getenv("PAGE_TIMEOUT", "120"))
 PDF_DPI = int(os.getenv("PDF_DPI", "200"))
 # 单文件内并发 Worker 数
-CONCURRENCY = int(os.getenv("CONCURRENCY", "5"))
+CONCURRENCY = int(os.getenv("CONCURRENCY", "3"))
 # 启用并发的最小页数
 CONCURRENCY_THRESHOLD = int(os.getenv("CONCURRENCY_THRESHOLD", "10"))
 # 全局最大同时发出的 API 请求数（多文件×多Worker）
-MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "8"))
+MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "3"))  # 事务所网关上限 3
 # 翻译：同时在途的流式请求上限。与 MAX_CONCURRENT_REQUESTS 是两层约束——后者管
 # 所有出站请求的发起，这一层专管翻译，且覆盖整个流的生命周期（见 translate_chunk_stream）。
 TRANSLATE_CONCURRENCY = int(os.getenv("TRANSLATE_CONCURRENCY", "3"))
