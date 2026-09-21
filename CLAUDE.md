@@ -32,7 +32,7 @@ bash start.sh    /  start.bat       # 启动，默认 http://127.0.0.1:4000
 | 变量 | 说明 |
 |---|---|
 | `TARGET_API_URL` / `TARGET_API_KEY` / `ACTUAL_MODEL_NAME` | 网关三件套 |
-| `LLM_PROFILE` | 模型档案（`glm53flash` 当前默认 / `kimi26`），按网关背后**真实**模型选，决定关闭思考模式用哪套参数。见「模型档案与思考模式」 |
+| `LLM_PROFILE` | 模型档案（`glm53flash` 当前默认 / `kimi26`），决定关闭思考模式用哪套参数。见「模型档案与思考模式」 |
 | `PDF_DPI` | 页缓存键的一部分，改了缓存全失效 |
 | `TRANSLATE_CONCURRENCY` | 翻译流并发（嵌套在 `MAX_CONCURRENT_REQUESTS` 内，覆盖整个流生命周期） |
 | `JOB_HISTORY_MAX` / `SUBSCRIBER_QUEUE_MAX` | 作业注册表内存边界 |
